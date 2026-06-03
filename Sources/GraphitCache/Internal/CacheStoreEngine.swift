@@ -71,6 +71,8 @@ actor CacheStoreEngine {
     }
 
     func cleanup() throws -> CacheCleanupResult {
+        try Task.checkCancellation()
+
         let now = configuration.clock.now()
         var result = CacheCleanupResult.empty
 
@@ -81,6 +83,7 @@ actor CacheStoreEngine {
             let eviction = memory.enforceCapacity(in: bucket.id, policy: bucket.policy)
             result = combined(result, cleanupResult(evicted: eviction))
         }
+        try Task.checkCancellation()
 
         if let metadataIndex, let diskFileStore {
             let leaseCheck = diskLeaseCheck()
@@ -90,19 +93,23 @@ actor CacheStoreEngine {
             try diskFileStore.removeStorageRefs(diskExpired.storageRefs)
             result = combined(result, cleanupResult(expired: diskExpired.removal))
             skippedLeasedEntries.formUnion(diskExpired.skippedLeasedEntries)
+            try Task.checkCancellation()
 
             let missingPayloadRepair = try metadataIndex.removeEntriesWithMissingPayloads(
                 storageRefExists: { storageRef in diskFileStore.storageRefExists(storageRef) },
                 isFileLeased: leaseCheck
             )
             skippedLeasedEntries.formUnion(missingPayloadRepair.skippedLeasedEntries)
+            try Task.checkCancellation()
 
             let removedTempOrphans = try diskFileStore.removeTemporaryOrphans(excluding: activeTemporaryFiles)
             result = combined(result, cleanupResult(orphanedFiles: removedTempOrphans))
+            try Task.checkCancellation()
 
             let knownRefs = try metadataIndex.storageRefs()
             let removedFinalOrphans = try diskFileStore.removeFinalOrphans(knownStorageRefs: knownRefs)
             result = combined(result, cleanupResult(orphanedFiles: removedFinalOrphans))
+            try Task.checkCancellation()
 
             for bucket in configuration.buckets where bucket.policy.storage == .diskBacked {
                 let eviction = try metadataIndex.enforceCapacity(
@@ -113,6 +120,7 @@ actor CacheStoreEngine {
                 try diskFileStore.removeStorageRefs(eviction.storageRefs)
                 result = combined(result, cleanupResult(evicted: eviction.removal))
                 skippedLeasedEntries.formUnion(eviction.skippedLeasedEntries)
+                try Task.checkCancellation()
             }
 
             result = combined(result, cleanupResult(skippedLeasedEntries: skippedLeasedEntries.count))
@@ -122,6 +130,8 @@ actor CacheStoreEngine {
     }
 
     func cleanup(bucket: CacheBucketID) throws -> CacheCleanupResult {
+        try Task.checkCancellation()
+
         guard let policy = bucketPolicies[bucket] else {
             return .empty
         }
@@ -143,6 +153,7 @@ actor CacheStoreEngine {
             try diskFileStore.removeStorageRefs(expired.storageRefs)
             result = combined(result, cleanupResult(expired: expired.removal))
             skippedLeasedEntries.formUnion(expired.skippedLeasedEntries)
+            try Task.checkCancellation()
 
             let missingPayloadRepair = try metadataIndex.removeEntriesWithMissingPayloads(
                 in: bucket,
@@ -150,6 +161,7 @@ actor CacheStoreEngine {
                 isFileLeased: leaseCheck
             )
             skippedLeasedEntries.formUnion(missingPayloadRepair.skippedLeasedEntries)
+            try Task.checkCancellation()
 
             let knownRefs = try metadataIndex.storageRefs(in: bucket)
             let removedFinalOrphans = try diskFileStore.removeFinalOrphans(
@@ -157,17 +169,21 @@ actor CacheStoreEngine {
                 in: bucket
             )
             result = combined(result, cleanupResult(orphanedFiles: removedFinalOrphans))
+            try Task.checkCancellation()
 
             let eviction = try metadataIndex.enforceCapacity(in: bucket, policy: policy, isFileLeased: leaseCheck)
             try diskFileStore.removeStorageRefs(eviction.storageRefs)
             result = combined(result, cleanupResult(evicted: eviction.removal))
             skippedLeasedEntries.formUnion(eviction.skippedLeasedEntries)
+            try Task.checkCancellation()
 
             return combined(result, cleanupResult(skippedLeasedEntries: skippedLeasedEntries.count))
         }
     }
 
     func removeAll() throws -> CacheRemovalResult {
+        try Task.checkCancellation()
+
         var result = memory.removeAll()
         if let metadataIndex, let diskFileStore {
             let diskRemoval = try metadataIndex.removeAll(isFileLeased: diskLeaseCheck())
@@ -178,6 +194,8 @@ actor CacheStoreEngine {
     }
 
     func removeAll(in bucket: CacheBucketID) throws -> CacheRemovalResult {
+        try Task.checkCancellation()
+
         var result = CacheRemovalResult.empty
         if bucketPolicies[bucket]?.storage == .memoryOnly {
             result = combined(result, memory.removeAll(in: bucket))
@@ -191,6 +209,8 @@ actor CacheStoreEngine {
     }
 
     func removeAll(tagged tag: CacheTag) throws -> CacheRemovalResult {
+        try Task.checkCancellation()
+
         var result = memory.removeAll(tagged: tag)
         if let metadataIndex, let diskFileStore {
             let diskRemoval = try metadataIndex.removeAll(tagged: tag, isFileLeased: diskLeaseCheck())
@@ -201,6 +221,8 @@ actor CacheStoreEngine {
     }
 
     func removeAll(insertedBefore date: Date) throws -> CacheRemovalResult {
+        try Task.checkCancellation()
+
         var result = memory.removeAll(insertedBefore: date)
         if let metadataIndex, let diskFileStore {
             let diskRemoval = try metadataIndex.removeAll(insertedBefore: date, isFileLeased: diskLeaseCheck())
@@ -211,6 +233,8 @@ actor CacheStoreEngine {
     }
 
     func removeAll(in bucket: CacheBucketID, tagged tag: CacheTag) throws -> CacheRemovalResult {
+        try Task.checkCancellation()
+
         var result = CacheRemovalResult.empty
         if bucketPolicies[bucket]?.storage == .memoryOnly {
             result = combined(result, memory.removeAll(in: bucket, tagged: tag))
@@ -224,6 +248,8 @@ actor CacheStoreEngine {
     }
 
     func removeAll(in bucket: CacheBucketID, insertedBefore date: Date) throws -> CacheRemovalResult {
+        try Task.checkCancellation()
+
         var result = CacheRemovalResult.empty
         if bucketPolicies[bucket]?.storage == .memoryOnly {
             result = combined(result, memory.removeAll(in: bucket, insertedBefore: date))
@@ -237,6 +263,8 @@ actor CacheStoreEngine {
     }
 
     func dataInfo(bucket: CacheBucketID, key: CacheKey) throws -> CacheEntryInfo? {
+        try Task.checkCancellation()
+
         guard let policy = bucketPolicies[bucket] else {
             throw CacheError.unknownBucket(bucket)
         }
@@ -250,11 +278,14 @@ actor CacheStoreEngine {
     }
 
     func fileInfo(bucket: CacheBucketID, key: CacheKey, policy: BucketPolicy) throws -> CacheEntryInfo? {
+        try Task.checkCancellation()
         try requireFileStorage(policy)
         return try diskFileInfo(bucket: bucket, key: key)
     }
 
     func data(bucket: CacheBucketID, key: CacheKey) async throws -> CachedData? {
+        try Task.checkCancellation()
+
         guard let policy = bucketPolicies[bucket] else {
             throw CacheError.unknownBucket(bucket)
         }
@@ -268,6 +299,8 @@ actor CacheStoreEngine {
     }
 
     func setData(_ data: Data, bucket: CacheBucketID, key: CacheKey, options: CacheEntryOptions) async throws {
+        try Task.checkCancellation()
+
         guard let policy = bucketPolicies[bucket] else {
             throw CacheError.unknownBucket(bucket)
         }
@@ -288,6 +321,7 @@ actor CacheStoreEngine {
     }
 
     func leaseFile(bucket: CacheBucketID, key: CacheKey, policy: BucketPolicy) throws -> CachedFileLease? {
+        try Task.checkCancellation()
         try requireFileStorage(policy)
         return try diskLeaseFile(bucket: bucket, key: key)
     }
@@ -299,11 +333,14 @@ actor CacheStoreEngine {
         options: CacheFileOptions,
         policy: BucketPolicy
     ) async throws {
+        try Task.checkCancellation()
         try requireFileStorage(policy)
         try await setDiskFile(at: sourceURL, bucket: bucket, key: key, options: options, policy: policy)
     }
 
     func remove(bucket: CacheBucketID, key: CacheKey) throws -> CacheRemovalResult {
+        try Task.checkCancellation()
+
         guard let policy = bucketPolicies[bucket] else {
             throw CacheError.unknownBucket(bucket)
         }
@@ -330,6 +367,8 @@ actor CacheStoreEngine {
         options: CacheEntryOptions,
         policy: BucketPolicy
     ) async throws {
+        try Task.checkCancellation()
+
         let size = ByteCount.bytes(Int64(data.count))
         try validateItemSize(size, bucket: bucket, policy: policy)
         try throwIfExistingFileIsLeased(bucket: bucket, key: key)
@@ -361,6 +400,7 @@ actor CacheStoreEngine {
                 expirationDurationUS: expiration.durationUS,
                 tags: options.tags
             )
+            try Task.checkCancellation()
 
             let commit = try metadataIndex.commitWrite(write, policy: policy, isFileLeased: diskLeaseCheck()) {
                 try diskFileStore.moveTemporaryFile(from: plan.temporaryURL, to: plan.storageRef)
@@ -382,6 +422,8 @@ actor CacheStoreEngine {
         options: CacheFileOptions,
         policy: BucketPolicy
     ) async throws {
+        try Task.checkCancellation()
+
         let diskFileStore = try diskStore()
         let metadataIndex = try diskIndex()
         let sourceMetadata = try diskFileStore.validateSourceFile(at: sourceURL)
@@ -416,6 +458,7 @@ actor CacheStoreEngine {
                 expirationDurationUS: expiration.durationUS,
                 tags: options.tags
             )
+            try Task.checkCancellation()
 
             let commit = try metadataIndex.commitWrite(write, policy: policy, isFileLeased: diskLeaseCheck()) {
                 try diskFileStore.moveTemporaryFile(from: plan.temporaryURL, to: plan.storageRef)
@@ -469,6 +512,8 @@ actor CacheStoreEngine {
     }
 
     private func diskLeaseFile(bucket: CacheBucketID, key: CacheKey) throws -> CachedFileLease? {
+        try Task.checkCancellation()
+
         guard let record = try diskIndex().fetchEntry(bucket: bucket, key: key), record.payloadKind == .file else {
             return nil
         }
@@ -497,6 +542,7 @@ actor CacheStoreEngine {
             }
             updatedExpiresAtUS = try CacheDateEncoding.adding(durationUS, to: accessedAtUS)
         }
+        try Task.checkCancellation()
 
         try diskIndex().updateAccess(
             entryID: record.id,
@@ -513,6 +559,8 @@ actor CacheStoreEngine {
     }
 
     private func diskData(bucket: CacheBucketID, key: CacheKey) async throws -> CachedData? {
+        try Task.checkCancellation()
+
         guard let initialRecord = try diskIndex().fetchEntry(bucket: bucket, key: key),
               initialRecord.payloadKind == .data
         else {
@@ -570,6 +618,7 @@ actor CacheStoreEngine {
             }
             updatedExpiresAtUS = try CacheDateEncoding.adding(durationUS, to: accessedAtUS)
         }
+        try Task.checkCancellation()
 
         try diskIndex().updateAccess(
             entryID: currentRecord.id,
