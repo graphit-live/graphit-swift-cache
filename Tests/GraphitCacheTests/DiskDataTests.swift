@@ -173,6 +173,71 @@ import Testing
     #expect(try await slidingBucket.dataInfo(for: CacheKey("sliding")) == nil)
 }
 
+@Test func diskDataLeastRecentlyUsedEvictsUnaccessedEntriesFirst() async throws {
+    let directory = try TemporaryCacheDirectory()
+    defer { directory.remove() }
+    let clock = TestCacheClock(now: Date(timeIntervalSince1970: 0))
+    let bucket = try makeDiskBucket(
+        root: directory.url,
+        policy: .diskBacked(maxTotalSize: .bytes(6), eviction: .leastRecentlyUsed),
+        clock: clock
+    )
+
+    try await bucket.setData(Data([1, 1, 1]), for: CacheKey("a"))
+    clock.setNow(Date(timeIntervalSince1970: 1))
+    try await bucket.setData(Data([2, 2, 2]), for: CacheKey("b"))
+
+    clock.setNow(Date(timeIntervalSince1970: 2))
+    #expect(try await bucket.data(CacheKey("a"))?.data == Data([1, 1, 1]))
+
+    clock.setNow(Date(timeIntervalSince1970: 3))
+    try await bucket.setData(Data([3, 3, 3]), for: CacheKey("c"))
+
+    #expect(try await bucket.dataInfo(for: CacheKey("a")) != nil)
+    #expect(try await bucket.dataInfo(for: CacheKey("b")) == nil)
+    #expect(try await bucket.dataInfo(for: CacheKey("c")) != nil)
+}
+
+@Test func diskDataOldestInsertedFirstIgnoresRecentAccessForEviction() async throws {
+    let directory = try TemporaryCacheDirectory()
+    defer { directory.remove() }
+    let clock = TestCacheClock(now: Date(timeIntervalSince1970: 0))
+    let bucket = try makeDiskBucket(
+        root: directory.url,
+        policy: .diskBacked(maxTotalSize: .bytes(6), eviction: .oldestInsertedFirst),
+        clock: clock
+    )
+
+    try await bucket.setData(Data([1, 1, 1]), for: CacheKey("a"))
+    clock.setNow(Date(timeIntervalSince1970: 1))
+    try await bucket.setData(Data([2, 2, 2]), for: CacheKey("b"))
+
+    clock.setNow(Date(timeIntervalSince1970: 2))
+    #expect(try await bucket.data(CacheKey("a"))?.data == Data([1, 1, 1]))
+
+    clock.setNow(Date(timeIntervalSince1970: 3))
+    try await bucket.setData(Data([3, 3, 3]), for: CacheKey("c"))
+
+    #expect(try await bucket.dataInfo(for: CacheKey("a")) == nil)
+    #expect(try await bucket.dataInfo(for: CacheKey("b")) != nil)
+    #expect(try await bucket.dataInfo(for: CacheKey("c")) != nil)
+}
+
+@Test func diskBucketHandleRetainsStoreEngineAfterStoreLeavesScope() async throws {
+    let directory = try TemporaryCacheDirectory()
+    defer { directory.remove() }
+    let bucket: CacheBucket = try {
+        let store = try makeDiskStore(root: directory.url)
+        return try store.bucket(CacheBucketID("disk"))
+    }()
+    let key = CacheKey("retained-disk-bucket")
+    let payload = Data([4, 5, 6])
+
+    try await bucket.setData(payload, for: key)
+
+    #expect(try await bucket.data(key)?.data == payload)
+}
+
 private func makeDiskStore(
     root: URL,
     policy: BucketPolicy = .diskBacked(maxTotalSize: .bytes(100)),

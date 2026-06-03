@@ -211,6 +211,103 @@ import Testing
     #expect(removal == CacheRemovalResult(removedEntries: 1, removedBytes: .bytes(1)))
 }
 
+@Test func fileInfoDoesNotExtendSlidingExpirationButLeaseFileDoes() async throws {
+    let directory = try TemporaryCacheDirectory()
+    defer { directory.remove() }
+    let clock = TestCacheClock(now: Date(timeIntervalSince1970: 0))
+    let bucket = try makeFileBucket(
+        root: directory.url,
+        policy: .diskBacked(maxTotalSize: .bytes(100), expiration: .sliding(.seconds(10))),
+        clock: clock
+    )
+    let key = CacheKey("sliding-file")
+
+    try await bucket.setFile(
+        at: try writeSourceFile(in: directory.url, name: "sliding.bin", data: Data([1, 2, 3])),
+        for: key
+    )
+
+    clock.setNow(Date(timeIntervalSince1970: 5))
+    let infoAfterMetadataRead = try await bucket.fileInfo(for: key)
+    #expect(infoAfterMetadataRead?.lastAccessedAt == nil)
+    #expect(infoAfterMetadataRead?.expiresAt == Date(timeIntervalSince1970: 10))
+
+    clock.setNow(Date(timeIntervalSince1970: 9))
+    let lease = try #require(try await bucket.leaseFile(key))
+    #expect(lease.info.lastAccessedAt == Date(timeIntervalSince1970: 9))
+    #expect(lease.info.expiresAt == Date(timeIntervalSince1970: 19))
+    lease.release()
+
+    clock.setNow(Date(timeIntervalSince1970: 18))
+    let infoAfterLease = try await bucket.fileInfo(for: key)
+    #expect(infoAfterLease?.lastAccessedAt == Date(timeIntervalSince1970: 9))
+    #expect(infoAfterLease?.expiresAt == Date(timeIntervalSince1970: 19))
+
+    clock.setNow(Date(timeIntervalSince1970: 19))
+    #expect(try await bucket.fileInfo(for: key) == nil)
+}
+
+@Test func multipleFileLeasesKeepFileProtectedUntilEveryLeaseReleases() async throws {
+    let directory = try TemporaryCacheDirectory()
+    defer { directory.remove() }
+    let bucket = try makeFileBucket(root: directory.url)
+    let key = CacheKey("multiple-leases")
+
+    try await bucket.setFile(
+        at: try writeSourceFile(in: directory.url, name: "multi.bin", data: Data([1, 2])),
+        for: key
+    )
+
+    let firstLease = try #require(try await bucket.leaseFile(key))
+    let secondLease = try #require(try await bucket.leaseFile(key))
+
+    firstLease.release()
+
+    await expectCacheError({
+        _ = try await bucket.remove(key)
+    }) { error in
+        error == .fileIsLeased(bucket: bucket.id, key: key)
+    }
+
+    secondLease.release()
+
+    let removal = try await bucket.remove(key)
+    #expect(removal == CacheRemovalResult(removedEntries: 1, removedBytes: .bytes(2)))
+}
+
+@Test func bucketScopedBulkRemovalSkipsLeasedFilesAndReportsSkippedCount() async throws {
+    let directory = try TemporaryCacheDirectory()
+    defer { directory.remove() }
+    let bucket = try makeFileBucket(root: directory.url)
+    let leasedKey = CacheKey("leased-bucket-removal")
+    let freeKey = CacheKey("free-bucket-removal")
+
+    try await bucket.setFile(
+        at: try writeSourceFile(in: directory.url, name: "leased-bucket.bin", data: Data([1, 2])),
+        for: leasedKey
+    )
+    try await bucket.setFile(
+        at: try writeSourceFile(in: directory.url, name: "free-bucket.bin", data: Data([3, 4, 5])),
+        for: freeKey
+    )
+
+    let lease = try #require(try await bucket.leaseFile(leasedKey))
+
+    let removal = try await bucket.removeAll()
+    #expect(removal == CacheRemovalResult(
+        removedEntries: 1,
+        removedBytes: .bytes(3),
+        skippedLeasedEntries: 1
+    ))
+    #expect(try await bucket.fileInfo(for: leasedKey) != nil)
+    #expect(try await bucket.fileInfo(for: freeKey) == nil)
+
+    lease.release()
+
+    let finalRemoval = try await bucket.removeAll()
+    #expect(finalRemoval == CacheRemovalResult(removedEntries: 1, removedBytes: .bytes(2)))
+}
+
 @Test func fileImportValidatesSourceURL() async throws {
     let directory = try TemporaryCacheDirectory()
     defer { directory.remove() }
