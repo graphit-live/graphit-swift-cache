@@ -5,21 +5,39 @@ actor CacheStoreEngine {
 
     private let configuration: CacheStoreConfiguration
     private let bucketPolicies: [CacheBucketID: BucketPolicy]
+    private let diskFileStore: PersistentFileStore?
+    private let metadataIndex: SQLiteMetadataIndex?
     private var memory = MemoryCacheEngine()
 
-    init(configuration: CacheStoreConfiguration) {
+    init(configuration: CacheStoreConfiguration) throws {
         self.configuration = configuration
 
         var bucketPolicies: [CacheBucketID: BucketPolicy] = [:]
+        var hasDiskBackedBucket = false
         for bucket in configuration.buckets {
             bucketPolicies[bucket.id] = bucket.policy
+            if bucket.policy.storage == .diskBacked {
+                hasDiskBackedBucket = true
+            }
         }
         self.bucketPolicies = bucketPolicies
+
+        if hasDiskBackedBucket {
+            guard let rootDirectory = configuration.rootDirectory else {
+                throw CacheError.invalidConfiguration("Disk-backed buckets require a file URL rootDirectory.")
+            }
+            let fileStore = try PersistentFileStore(rootDirectory: rootDirectory)
+            self.diskFileStore = fileStore
+            self.metadataIndex = try SQLiteMetadataIndex(databaseURL: fileStore.metadataDatabaseURL)
+        } else {
+            self.diskFileStore = nil
+            self.metadataIndex = nil
+        }
     }
 
-    func usage() -> CacheUsage {
-        let bucketUsages = configuration.buckets.map { bucket in
-            usage(bucket: bucket.id, policy: bucket.policy)
+    func usage() throws -> CacheUsage {
+        let bucketUsages = try configuration.buckets.map { bucket in
+            try usage(bucket: bucket.id, policy: bucket.policy)
         }
         let totalBytes = bucketUsages.reduce(into: Int64(0)) { total, usage in
             total += usage.totalSize.bytes
@@ -43,14 +61,16 @@ actor CacheStoreEngine {
         )
     }
 
-    func usage(bucket: CacheBucketID, policy: BucketPolicy) -> BucketUsage {
-        guard policy.storage == .memoryOnly else {
-            return emptyUsage(bucket: bucket)
+    func usage(bucket: CacheBucketID, policy: BucketPolicy) throws -> BucketUsage {
+        switch policy.storage {
+        case .memoryOnly:
+            return memory.usage(in: bucket)
+        case .diskBacked:
+            return try diskIndex().usage(in: bucket)
         }
-        return memory.usage(in: bucket)
     }
 
-    func cleanup() -> CacheCleanupResult {
+    func cleanup() throws -> CacheCleanupResult {
         let now = configuration.clock.now()
         let expired = memory.removeExpired(now: now)
         var evictedEntries = 0
@@ -70,7 +90,7 @@ actor CacheStoreEngine {
         )
     }
 
-    func cleanup(bucket: CacheBucketID) -> CacheCleanupResult {
+    func cleanup(bucket: CacheBucketID) throws -> CacheCleanupResult {
         guard let policy = bucketPolicies[bucket], policy.storage == .memoryOnly else {
             return .empty
         }
@@ -87,44 +107,86 @@ actor CacheStoreEngine {
         )
     }
 
-    func removeAll() -> CacheRemovalResult {
-        memory.removeAll()
-    }
-
-    func removeAll(in bucket: CacheBucketID) -> CacheRemovalResult {
-        guard bucketPolicies[bucket]?.storage == .memoryOnly else {
-            return .empty
+    func removeAll() throws -> CacheRemovalResult {
+        var result = memory.removeAll()
+        if let metadataIndex, let diskFileStore {
+            let diskRemoval = try metadataIndex.removeAll()
+            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
+            result = combined(result, diskRemoval.0)
         }
-        return memory.removeAll(in: bucket)
+        return result
     }
 
-    func removeAll(tagged tag: CacheTag) -> CacheRemovalResult {
-        memory.removeAll(tagged: tag)
-    }
-
-    func removeAll(insertedBefore date: Date) -> CacheRemovalResult {
-        memory.removeAll(insertedBefore: date)
-    }
-
-    func removeAll(in bucket: CacheBucketID, tagged tag: CacheTag) -> CacheRemovalResult {
-        guard bucketPolicies[bucket]?.storage == .memoryOnly else {
-            return .empty
+    func removeAll(in bucket: CacheBucketID) throws -> CacheRemovalResult {
+        var result = CacheRemovalResult.empty
+        if bucketPolicies[bucket]?.storage == .memoryOnly {
+            result = combined(result, memory.removeAll(in: bucket))
         }
-        return memory.removeAll(in: bucket, tagged: tag)
+        if let metadataIndex, let diskFileStore {
+            let diskRemoval = try metadataIndex.removeAll(in: bucket)
+            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
+            result = combined(result, diskRemoval.0)
+        }
+        return result
     }
 
-    func removeAll(in bucket: CacheBucketID, insertedBefore date: Date) -> CacheRemovalResult {
-        guard bucketPolicies[bucket]?.storage == .memoryOnly else {
-            return .empty
+    func removeAll(tagged tag: CacheTag) throws -> CacheRemovalResult {
+        var result = memory.removeAll(tagged: tag)
+        if let metadataIndex, let diskFileStore {
+            let diskRemoval = try metadataIndex.removeAll(tagged: tag)
+            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
+            result = combined(result, diskRemoval.0)
         }
-        return memory.removeAll(in: bucket, insertedBefore: date)
+        return result
     }
 
-    func dataInfo(bucket: CacheBucketID, key: CacheKey) -> CacheEntryInfo? {
-        guard bucketPolicies[bucket]?.storage == .memoryOnly else {
-            return nil
+    func removeAll(insertedBefore date: Date) throws -> CacheRemovalResult {
+        var result = memory.removeAll(insertedBefore: date)
+        if let metadataIndex, let diskFileStore {
+            let diskRemoval = try metadataIndex.removeAll(insertedBefore: date)
+            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
+            result = combined(result, diskRemoval.0)
         }
-        return memory.dataInfo(bucket: bucket, key: key, now: configuration.clock.now())
+        return result
+    }
+
+    func removeAll(in bucket: CacheBucketID, tagged tag: CacheTag) throws -> CacheRemovalResult {
+        var result = CacheRemovalResult.empty
+        if bucketPolicies[bucket]?.storage == .memoryOnly {
+            result = combined(result, memory.removeAll(in: bucket, tagged: tag))
+        }
+        if let metadataIndex, let diskFileStore {
+            let diskRemoval = try metadataIndex.removeAll(in: bucket, tagged: tag)
+            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
+            result = combined(result, diskRemoval.0)
+        }
+        return result
+    }
+
+    func removeAll(in bucket: CacheBucketID, insertedBefore date: Date) throws -> CacheRemovalResult {
+        var result = CacheRemovalResult.empty
+        if bucketPolicies[bucket]?.storage == .memoryOnly {
+            result = combined(result, memory.removeAll(in: bucket, insertedBefore: date))
+        }
+        if let metadataIndex, let diskFileStore {
+            let diskRemoval = try metadataIndex.removeAll(in: bucket, insertedBefore: date)
+            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
+            result = combined(result, diskRemoval.0)
+        }
+        return result
+    }
+
+    func dataInfo(bucket: CacheBucketID, key: CacheKey) throws -> CacheEntryInfo? {
+        guard let policy = bucketPolicies[bucket] else {
+            throw CacheError.unknownBucket(bucket)
+        }
+
+        switch policy.storage {
+        case .memoryOnly:
+            return memory.dataInfo(bucket: bucket, key: key, now: configuration.clock.now())
+        case .diskBacked:
+            return try diskDataInfo(bucket: bucket, key: key)
+        }
     }
 
     func fileInfo(bucket: CacheBucketID, key: CacheKey, policy: BucketPolicy) throws -> CacheEntryInfo? {
@@ -132,14 +194,20 @@ actor CacheStoreEngine {
         return nil
     }
 
-    func data(bucket: CacheBucketID, key: CacheKey) -> CachedData? {
-        guard bucketPolicies[bucket]?.storage == .memoryOnly else {
-            return nil
+    func data(bucket: CacheBucketID, key: CacheKey) async throws -> CachedData? {
+        guard let policy = bucketPolicies[bucket] else {
+            throw CacheError.unknownBucket(bucket)
         }
-        return memory.data(bucket: bucket, key: key, accessedAt: configuration.clock.now())
+
+        switch policy.storage {
+        case .memoryOnly:
+            return memory.data(bucket: bucket, key: key, accessedAt: configuration.clock.now())
+        case .diskBacked:
+            return try await diskData(bucket: bucket, key: key)
+        }
     }
 
-    func setData(_ data: Data, bucket: CacheBucketID, key: CacheKey, options: CacheEntryOptions) throws {
+    func setData(_ data: Data, bucket: CacheBucketID, key: CacheKey, options: CacheEntryOptions) async throws {
         guard let policy = bucketPolicies[bucket] else {
             throw CacheError.unknownBucket(bucket)
         }
@@ -155,7 +223,7 @@ actor CacheStoreEngine {
                 storedAt: configuration.clock.now()
             )
         case .diskBacked:
-            throw CacheError.storageFailure(Self.unimplementedStorageMessage)
+            try await setDiskData(data, bucket: bucket, key: key, options: options, policy: policy)
         }
     }
 
@@ -175,11 +243,169 @@ actor CacheStoreEngine {
         throw CacheError.storageFailure(Self.unimplementedStorageMessage)
     }
 
-    func remove(bucket: CacheBucketID, key: CacheKey) -> CacheRemovalResult {
-        guard bucketPolicies[bucket]?.storage == .memoryOnly else {
-            return .empty
+    func remove(bucket: CacheBucketID, key: CacheKey) throws -> CacheRemovalResult {
+        guard let policy = bucketPolicies[bucket] else {
+            throw CacheError.unknownBucket(bucket)
         }
-        return memory.remove(bucket: bucket, key: key)
+
+        switch policy.storage {
+        case .memoryOnly:
+            return memory.remove(bucket: bucket, key: key)
+        case .diskBacked:
+            let diskRemoval = try diskIndex().removeEntry(bucket: bucket, key: key)
+            let diskFileStore = try diskStore()
+            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
+            return diskRemoval.0
+        }
+    }
+
+    private func setDiskData(
+        _ data: Data,
+        bucket: CacheBucketID,
+        key: CacheKey,
+        options: CacheEntryOptions,
+        policy: BucketPolicy
+    ) async throws {
+        let size = ByteCount.bytes(Int64(data.count))
+        try validateItemSize(size, bucket: bucket, policy: policy)
+
+        let diskFileStore = try diskStore()
+        let metadataIndex = try diskIndex()
+        let plan = diskFileStore.planDataWrite(bucket: bucket, key: key)
+
+        try Task.checkCancellation()
+        do {
+            try await diskFileStore.writeDataToTemporaryFile(data, at: plan.temporaryURL)
+            try Task.checkCancellation()
+
+            let storedAtUS = CacheDateEncoding.microsecondsSinceEpoch(configuration.clock.now())
+            let expiration = try diskExpiration(policy.expiration, storedAtUS: storedAtUS)
+            let write = DiskEntryWrite(
+                id: plan.entryID,
+                bucket: bucket,
+                key: key,
+                payloadKind: .data,
+                storageRef: plan.storageRef,
+                size: size,
+                storedAtUS: storedAtUS,
+                expiresAtUS: expiration.expiresAtUS,
+                expirationKind: expiration.kind,
+                expirationDurationUS: expiration.durationUS,
+                tags: options.tags
+            )
+
+            let commit = try metadataIndex.commitWrite(write, policy: policy) {
+                try diskFileStore.moveTemporaryFile(from: plan.temporaryURL, to: plan.storageRef)
+            }
+            diskFileStore.removeStorageRefsBestEffort(commit.removableStorageRefs)
+        } catch is CancellationError {
+            diskFileStore.removeTemporaryFileBestEffort(at: plan.temporaryURL)
+            throw CancellationError()
+        } catch {
+            diskFileStore.removeTemporaryFileBestEffort(at: plan.temporaryURL)
+            throw error
+        }
+    }
+
+    private func diskDataInfo(bucket: CacheBucketID, key: CacheKey) throws -> CacheEntryInfo? {
+        guard let record = try diskIndex().fetchEntry(bucket: bucket, key: key), record.payloadKind == .data else {
+            return nil
+        }
+
+        let now = configuration.clock.now()
+        if record.info().isExpired(at: now) {
+            try removeDiskRecord(bucket: bucket, key: key)
+            return nil
+        }
+
+        return record.info()
+    }
+
+    private func diskData(bucket: CacheBucketID, key: CacheKey) async throws -> CachedData? {
+        guard let initialRecord = try diskIndex().fetchEntry(bucket: bucket, key: key),
+              initialRecord.payloadKind == .data
+        else {
+            return nil
+        }
+
+        if initialRecord.info().isExpired(at: configuration.clock.now()) {
+            try removeDiskRecord(bucket: bucket, key: key)
+            return nil
+        }
+
+        let data = try await diskStore().readData(storageRef: initialRecord.storageRef)
+        try Task.checkCancellation()
+
+        guard let currentRecord = try diskIndex().fetchEntry(bucket: bucket, key: key),
+              currentRecord.payloadKind == .data,
+              currentRecord.storageRef == initialRecord.storageRef
+        else {
+            return nil
+        }
+
+        let accessedAt = configuration.clock.now()
+        if currentRecord.info().isExpired(at: accessedAt) {
+            try removeDiskRecord(bucket: bucket, key: key)
+            return nil
+        }
+
+        let accessedAtUS = CacheDateEncoding.microsecondsSinceEpoch(accessedAt)
+        let updatedExpiresAtUS: Int64?
+        switch currentRecord.expirationKind {
+        case .never, .fixed:
+            updatedExpiresAtUS = currentRecord.expiresAtUS
+        case .sliding:
+            guard let durationUS = currentRecord.expirationDurationUS else {
+                throw CacheError.internalInconsistency("Sliding expiration is missing its duration.")
+            }
+            updatedExpiresAtUS = try CacheDateEncoding.adding(durationUS, to: accessedAtUS)
+        }
+
+        try diskIndex().updateAccess(
+            entryID: currentRecord.id,
+            lastAccessedAtUS: accessedAtUS,
+            expiresAtUS: updatedExpiresAtUS
+        )
+
+        return CachedData(
+            data: data,
+            info: currentRecord.info(lastAccessedAtUS: accessedAtUS, expiresAtUS: updatedExpiresAtUS)
+        )
+    }
+
+    private func removeDiskRecord(bucket: CacheBucketID, key: CacheKey) throws {
+        let removal = try diskIndex().removeEntry(bucket: bucket, key: key)
+        let diskFileStore = try diskStore()
+        diskFileStore.removeStorageRefsBestEffort(removal.1)
+    }
+
+    private func diskExpiration(
+        _ policy: CacheExpirationPolicy,
+        storedAtUS: Int64
+    ) throws -> (kind: StoredExpirationKind, durationUS: Int64?, expiresAtUS: Int64?) {
+        switch policy {
+        case .never:
+            return (.never, nil, nil)
+        case .fixed(let duration):
+            let durationUS = try CacheDurationEncoding.microseconds(duration)
+            return (.fixed, durationUS, try CacheDateEncoding.adding(durationUS, to: storedAtUS))
+        case .sliding(let duration):
+            let durationUS = try CacheDurationEncoding.microseconds(duration)
+            return (.sliding, durationUS, try CacheDateEncoding.adding(durationUS, to: storedAtUS))
+        }
+    }
+
+    private func validateItemSize(_ size: ByteCount, bucket: CacheBucketID, policy: BucketPolicy) throws {
+        if let maxItemSize = policy.maxItemSize, size > maxItemSize {
+            throw CacheError.itemTooLarge(size: size, limit: maxItemSize)
+        }
+
+        guard size <= policy.maxTotalSize else {
+            throw CacheError.capacityCannotBeSatisfied(
+                bucket: bucket,
+                constraint: .totalSize(requiredBytes: size, availableEvictableBytes: .zero)
+            )
+        }
     }
 
     private func requireFileStorage(_ policy: BucketPolicy) throws {
@@ -188,13 +414,25 @@ actor CacheStoreEngine {
         }
     }
 
-    private func emptyUsage(bucket: CacheBucketID) -> BucketUsage {
-        BucketUsage(
-            bucket: bucket,
-            totalSize: .zero,
-            diskSize: .zero,
-            memorySize: .zero,
-            entryCount: 0
+    private func diskStore() throws -> PersistentFileStore {
+        guard let diskFileStore else {
+            throw CacheError.internalInconsistency("Disk file store is unavailable.")
+        }
+        return diskFileStore
+    }
+
+    private func diskIndex() throws -> SQLiteMetadataIndex {
+        guard let metadataIndex else {
+            throw CacheError.internalInconsistency("SQLite metadata index is unavailable.")
+        }
+        return metadataIndex
+    }
+
+    private func combined(_ lhs: CacheRemovalResult, _ rhs: CacheRemovalResult) -> CacheRemovalResult {
+        CacheRemovalResult(
+            removedEntries: lhs.removedEntries + rhs.removedEntries,
+            removedBytes: ByteCount.bytes(lhs.removedBytes.bytes + rhs.removedBytes.bytes),
+            skippedLeasedEntries: lhs.skippedLeasedEntries + rhs.skippedLeasedEntries
         )
     }
 }

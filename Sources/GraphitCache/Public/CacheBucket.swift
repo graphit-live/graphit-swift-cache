@@ -28,7 +28,7 @@ public struct CacheBucket: Sendable {
     /// - Throws: A `CacheError` if the lookup fails.
     public func dataInfo(for key: CacheKey) async throws -> CacheEntryInfo? {
         try CacheValidation.validateKeyForInput(key)
-        return await engine.dataInfo(bucket: id, key: key)
+        return try await engine.dataInfo(bucket: id, key: key)
     }
 
     /// Returns metadata for a file entry without leasing or reading payload bytes.
@@ -52,7 +52,7 @@ public struct CacheBucket: Sendable {
     /// - Throws: A `CacheError` if the read fails.
     public func data(_ key: CacheKey) async throws -> CachedData? {
         try CacheValidation.validateKeyForInput(key)
-        return await engine.data(bucket: id, key: key)
+        return try await engine.data(bucket: id, key: key)
     }
 
     /// Stores data for a key.
@@ -106,7 +106,7 @@ public struct CacheBucket: Sendable {
     /// - Throws: A `CacheError` if removal fails or the current file is leased.
     public func remove(_ key: CacheKey) async throws -> CacheRemovalResult {
         try CacheValidation.validateKeyForInput(key)
-        return await engine.remove(bucket: id, key: key)
+        return try await engine.remove(bucket: id, key: key)
     }
 
     /// Removes all entries in this bucket.
@@ -114,7 +114,7 @@ public struct CacheBucket: Sendable {
     /// - Returns: A removal result describing removed entries and skipped leases.
     /// - Throws: A `CacheError` if removal fails.
     public func removeAll() async throws -> CacheRemovalResult {
-        await engine.removeAll(in: id)
+        try await engine.removeAll(in: id)
     }
 
     /// Removes all entries in this bucket that have a specific tag.
@@ -124,7 +124,7 @@ public struct CacheBucket: Sendable {
     /// - Throws: A `CacheError` if removal fails.
     public func removeAll(tagged tag: CacheTag) async throws -> CacheRemovalResult {
         try CacheValidation.validateTagForInput(tag)
-        return await engine.removeAll(in: id, tagged: tag)
+        return try await engine.removeAll(in: id, tagged: tag)
     }
 
     /// Removes all entries in this bucket stored before a date.
@@ -135,7 +135,7 @@ public struct CacheBucket: Sendable {
     /// - Returns: A removal result describing removed entries and skipped leases.
     /// - Throws: A `CacheError` if removal fails.
     public func removeAll(insertedBefore date: Date) async throws -> CacheRemovalResult {
-        await engine.removeAll(in: id, insertedBefore: date)
+        try await engine.removeAll(in: id, insertedBefore: date)
     }
 
     /// Returns a usage snapshot for this bucket.
@@ -143,7 +143,7 @@ public struct CacheBucket: Sendable {
     /// - Returns: A bucket usage snapshot.
     /// - Throws: A `CacheError` if usage cannot be read.
     public func usage() async throws -> BucketUsage {
-        await engine.usage(bucket: id, policy: policy)
+        try await engine.usage(bucket: id, policy: policy)
     }
 
     /// Performs explicit maintenance for this bucket.
@@ -151,6 +151,6 @@ public struct CacheBucket: Sendable {
     /// - Returns: A cleanup result describing removed entries and skipped leases.
     /// - Throws: A `CacheError` if cleanup fails.
     public func cleanup() async throws -> CacheCleanupResult {
-        await engine.cleanup(bucket: id)
+        try await engine.cleanup(bucket: id)
     }
 }

@@ -24,7 +24,7 @@ public final class CacheStore: Sendable {
             bucketPolicies[bucket.id] = bucket.policy
         }
         self.bucketPolicies = bucketPolicies
-        self.engine = CacheStoreEngine(configuration: configuration)
+        self.engine = try CacheStoreEngine(configuration: configuration)
     }
 
     /// Returns a handle for a configured active bucket.
@@ -51,7 +51,7 @@ public final class CacheStore: Sendable {
     /// - Returns: A usage snapshot.
     /// - Throws: A `CacheError` if usage cannot be read.
     public func usage() async throws -> CacheUsage {
-        await engine.usage()
+        try await engine.usage()
     }
 
     /// Performs explicit cache maintenance.
@@ -59,7 +59,7 @@ public final class CacheStore: Sendable {
     /// - Returns: A cleanup result describing removed entries and skipped leases.
     /// - Throws: A `CacheError` if cleanup fails.
     public func cleanup() async throws -> CacheCleanupResult {
-        await engine.cleanup()
+        try await engine.cleanup()
     }
 
     /// Removes all entries managed by the store.
@@ -67,7 +67,7 @@ public final class CacheStore: Sendable {
     /// - Returns: A removal result describing removed entries and skipped leases.
     /// - Throws: A `CacheError` if removal fails.
     public func removeAll() async throws -> CacheRemovalResult {
-        await engine.removeAll()
+        try await engine.removeAll()
     }
 
     /// Removes all entries in a bucket under the store root.
@@ -80,7 +80,7 @@ public final class CacheStore: Sendable {
     /// - Throws: A `CacheError` if the bucket ID is invalid or removal fails.
     public func removeAll(in bucket: CacheBucketID) async throws -> CacheRemovalResult {
         try CacheValidation.validateBucketIDForInput(bucket)
-        return await engine.removeAll(in: bucket)
+        return try await engine.removeAll(in: bucket)
     }
 
     /// Removes all entries tagged with a specific tag.
@@ -90,7 +90,7 @@ public final class CacheStore: Sendable {
     /// - Throws: A `CacheError` if removal fails.
     public func removeAll(tagged tag: CacheTag) async throws -> CacheRemovalResult {
         try CacheValidation.validateTagForInput(tag)
-        return await engine.removeAll(tagged: tag)
+        return try await engine.removeAll(tagged: tag)
     }
 
     /// Removes all entries stored before a date.
@@ -101,6 +101,6 @@ public final class CacheStore: Sendable {
     /// - Returns: A removal result describing removed entries and skipped leases.
     /// - Throws: A `CacheError` if removal fails.
     public func removeAll(insertedBefore date: Date) async throws -> CacheRemovalResult {
-        await engine.removeAll(insertedBefore: date)
+        try await engine.removeAll(insertedBefore: date)
     }
 }
