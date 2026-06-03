@@ -31,7 +31,8 @@ public struct CacheBucketID: RawRepresentable, Hashable, Codable, Sendable, Cust
 /// An app-defined grouping label attached to cache entries.
 ///
 /// Tags are useful for broad removal and app-owned categorization. GraphitCache does not assign
-/// semantic meaning such as MIME type or model kind to tags.
+/// semantic meaning such as MIME type or model kind to tags. Avoid storing secrets in tags if your
+/// app logs or displays their raw values.
 public struct CacheTag: RawRepresentable, Hashable, Codable, Sendable, CustomStringConvertible {
     /// The raw app-defined tag value.
     public let rawValue: String
@@ -59,7 +60,8 @@ public struct CacheTag: RawRepresentable, Hashable, Codable, Sendable, CustomStr
 /// The app-defined identity for a cached entry within a bucket.
 ///
 /// A single key maps to at most one current entry in a bucket. That entry is either data-backed or
-/// file-backed. Raw keys are never used directly as disk payload paths.
+/// file-backed. Raw keys are never used directly as disk payload paths. Avoid storing secrets in
+/// keys if your app logs or displays their raw values.
 public struct CacheKey: RawRepresentable, Hashable, Codable, Sendable, CustomStringConvertible {
     /// The raw app-defined cache key.
     public let rawValue: String

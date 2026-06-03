@@ -2,8 +2,9 @@ import Foundation
 
 /// A retained lease for a cache-managed file URL.
 ///
-/// The lease must be retained for as long as the caller uses `url`. Releasing the lease allows
-/// GraphitCache to remove or replace the file in later operations.
+/// The lease must be retained for as long as the caller uses `url`. The URL is owned by
+/// GraphitCache and should not be persisted as an app-owned file reference. Releasing the lease
+/// allows GraphitCache to remove or replace the file in later operations.
 public final class CachedFileLease: Sendable {
     /// The cache-managed file URL protected by this lease.
     public let url: URL
@@ -22,7 +23,8 @@ public final class CachedFileLease: Sendable {
     /// Releases the lease.
     ///
     /// Calling `release()` more than once is safe. Callers should release explicitly when they are
-    /// finished using the file URL; `deinit` is only a safety net.
+    /// finished using the file URL; `deinit` is only a synchronous safety net. After release,
+    /// later cache operations may remove or replace the file.
     public func release() {
         token.release()
     }

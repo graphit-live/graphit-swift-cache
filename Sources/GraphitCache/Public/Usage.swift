@@ -1,6 +1,9 @@
 import Foundation
 
 /// A snapshot of cache usage across the configured buckets in a store.
+///
+/// Usage snapshots are intentionally simple: total size, disk size, memory size, entry count, and
+/// per-bucket usage. They do not include grouped usage or data/file/expired breakdowns in v1.
 public struct CacheUsage: Sendable {
     /// The total size of all entries included in the snapshot.
     public let totalSize: ByteCount
@@ -33,6 +36,9 @@ public struct CacheUsage: Sendable {
 }
 
 /// A snapshot of cache usage for one bucket.
+///
+/// Memory-only buckets report `diskSize == .zero`; disk-backed buckets report
+/// `memorySize == .zero` in v1 because there is no hot memory tier.
 public struct BucketUsage: Sendable {
     /// The bucket represented by the snapshot.
     public let bucket: CacheBucketID
