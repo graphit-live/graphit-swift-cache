@@ -1,12 +1,11 @@
 import Foundation
 
 actor CacheStoreEngine {
-    private static let unimplementedStorageMessage = "This storage behavior is not implemented yet."
-
     private let configuration: CacheStoreConfiguration
     private let bucketPolicies: [CacheBucketID: BucketPolicy]
     private let diskFileStore: PersistentFileStore?
     private let metadataIndex: SQLiteMetadataIndex?
+    private let leaseTable = LeaseTable()
     private var memory = MemoryCacheEngine()
 
     init(configuration: CacheStoreConfiguration) throws {
@@ -110,7 +109,7 @@ actor CacheStoreEngine {
     func removeAll() throws -> CacheRemovalResult {
         var result = memory.removeAll()
         if let metadataIndex, let diskFileStore {
-            let diskRemoval = try metadataIndex.removeAll()
+            let diskRemoval = try metadataIndex.removeAll(isFileLeased: diskLeaseCheck())
             diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
             result = combined(result, diskRemoval.0)
         }
@@ -123,7 +122,7 @@ actor CacheStoreEngine {
             result = combined(result, memory.removeAll(in: bucket))
         }
         if let metadataIndex, let diskFileStore {
-            let diskRemoval = try metadataIndex.removeAll(in: bucket)
+            let diskRemoval = try metadataIndex.removeAll(in: bucket, isFileLeased: diskLeaseCheck())
             diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
             result = combined(result, diskRemoval.0)
         }
@@ -133,7 +132,7 @@ actor CacheStoreEngine {
     func removeAll(tagged tag: CacheTag) throws -> CacheRemovalResult {
         var result = memory.removeAll(tagged: tag)
         if let metadataIndex, let diskFileStore {
-            let diskRemoval = try metadataIndex.removeAll(tagged: tag)
+            let diskRemoval = try metadataIndex.removeAll(tagged: tag, isFileLeased: diskLeaseCheck())
             diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
             result = combined(result, diskRemoval.0)
         }
@@ -143,7 +142,7 @@ actor CacheStoreEngine {
     func removeAll(insertedBefore date: Date) throws -> CacheRemovalResult {
         var result = memory.removeAll(insertedBefore: date)
         if let metadataIndex, let diskFileStore {
-            let diskRemoval = try metadataIndex.removeAll(insertedBefore: date)
+            let diskRemoval = try metadataIndex.removeAll(insertedBefore: date, isFileLeased: diskLeaseCheck())
             diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
             result = combined(result, diskRemoval.0)
         }
@@ -156,7 +155,7 @@ actor CacheStoreEngine {
             result = combined(result, memory.removeAll(in: bucket, tagged: tag))
         }
         if let metadataIndex, let diskFileStore {
-            let diskRemoval = try metadataIndex.removeAll(in: bucket, tagged: tag)
+            let diskRemoval = try metadataIndex.removeAll(in: bucket, tagged: tag, isFileLeased: diskLeaseCheck())
             diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
             result = combined(result, diskRemoval.0)
         }
@@ -169,7 +168,7 @@ actor CacheStoreEngine {
             result = combined(result, memory.removeAll(in: bucket, insertedBefore: date))
         }
         if let metadataIndex, let diskFileStore {
-            let diskRemoval = try metadataIndex.removeAll(in: bucket, insertedBefore: date)
+            let diskRemoval = try metadataIndex.removeAll(in: bucket, insertedBefore: date, isFileLeased: diskLeaseCheck())
             diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
             result = combined(result, diskRemoval.0)
         }
@@ -191,7 +190,7 @@ actor CacheStoreEngine {
 
     func fileInfo(bucket: CacheBucketID, key: CacheKey, policy: BucketPolicy) throws -> CacheEntryInfo? {
         try requireFileStorage(policy)
-        return nil
+        return try diskFileInfo(bucket: bucket, key: key)
     }
 
     func data(bucket: CacheBucketID, key: CacheKey) async throws -> CachedData? {
@@ -229,7 +228,7 @@ actor CacheStoreEngine {
 
     func leaseFile(bucket: CacheBucketID, key: CacheKey, policy: BucketPolicy) throws -> CachedFileLease? {
         try requireFileStorage(policy)
-        return nil
+        return try diskLeaseFile(bucket: bucket, key: key)
     }
 
     func setFile(
@@ -238,9 +237,9 @@ actor CacheStoreEngine {
         key: CacheKey,
         options: CacheFileOptions,
         policy: BucketPolicy
-    ) throws {
+    ) async throws {
         try requireFileStorage(policy)
-        throw CacheError.storageFailure(Self.unimplementedStorageMessage)
+        try await setDiskFile(at: sourceURL, bucket: bucket, key: key, options: options, policy: policy)
     }
 
     func remove(bucket: CacheBucketID, key: CacheKey) throws -> CacheRemovalResult {
@@ -252,7 +251,11 @@ actor CacheStoreEngine {
         case .memoryOnly:
             return memory.remove(bucket: bucket, key: key)
         case .diskBacked:
-            let diskRemoval = try diskIndex().removeEntry(bucket: bucket, key: key)
+            let diskRemoval = try diskIndex().removeEntry(
+                bucket: bucket,
+                key: key,
+                isFileLeased: diskLeaseCheck()
+            )
             let diskFileStore = try diskStore()
             diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
             return diskRemoval.0
@@ -268,6 +271,7 @@ actor CacheStoreEngine {
     ) async throws {
         let size = ByteCount.bytes(Int64(data.count))
         try validateItemSize(size, bucket: bucket, policy: policy)
+        try throwIfExistingFileIsLeased(bucket: bucket, key: key)
 
         let diskFileStore = try diskStore()
         let metadataIndex = try diskIndex()
@@ -277,6 +281,7 @@ actor CacheStoreEngine {
         do {
             try await diskFileStore.writeDataToTemporaryFile(data, at: plan.temporaryURL)
             try Task.checkCancellation()
+            try throwIfExistingFileIsLeased(bucket: bucket, key: key)
 
             let storedAtUS = CacheDateEncoding.microsecondsSinceEpoch(configuration.clock.now())
             let expiration = try diskExpiration(policy.expiration, storedAtUS: storedAtUS)
@@ -294,7 +299,60 @@ actor CacheStoreEngine {
                 tags: options.tags
             )
 
-            let commit = try metadataIndex.commitWrite(write, policy: policy) {
+            let commit = try metadataIndex.commitWrite(write, policy: policy, isFileLeased: diskLeaseCheck()) {
+                try diskFileStore.moveTemporaryFile(from: plan.temporaryURL, to: plan.storageRef)
+            }
+            diskFileStore.removeStorageRefsBestEffort(commit.removableStorageRefs)
+        } catch is CancellationError {
+            diskFileStore.removeTemporaryFileBestEffort(at: plan.temporaryURL)
+            throw CancellationError()
+        } catch {
+            diskFileStore.removeTemporaryFileBestEffort(at: plan.temporaryURL)
+            throw error
+        }
+    }
+
+    private func setDiskFile(
+        at sourceURL: URL,
+        bucket: CacheBucketID,
+        key: CacheKey,
+        options: CacheFileOptions,
+        policy: BucketPolicy
+    ) async throws {
+        let diskFileStore = try diskStore()
+        let metadataIndex = try diskIndex()
+        let sourceMetadata = try diskFileStore.validateSourceFile(at: sourceURL)
+        try validateItemSize(sourceMetadata.size, bucket: bucket, policy: policy)
+        try throwIfExistingFileIsLeased(bucket: bucket, key: key)
+
+        let fileExtension = try resolvedFileExtension(sourceURL: sourceURL, options: options)
+        let plan = diskFileStore.planFileWrite(bucket: bucket, key: key, fileExtension: fileExtension)
+
+        try Task.checkCancellation()
+        do {
+            try await diskFileStore.copySourceFileToTemporaryFile(from: sourceURL, to: plan.temporaryURL)
+            try Task.checkCancellation()
+            let copiedSize = try diskFileStore.fileSize(at: plan.temporaryURL)
+            try validateItemSize(copiedSize, bucket: bucket, policy: policy)
+            try throwIfExistingFileIsLeased(bucket: bucket, key: key)
+
+            let storedAtUS = CacheDateEncoding.microsecondsSinceEpoch(configuration.clock.now())
+            let expiration = try diskExpiration(policy.expiration, storedAtUS: storedAtUS)
+            let write = DiskEntryWrite(
+                id: plan.entryID,
+                bucket: bucket,
+                key: key,
+                payloadKind: .file,
+                storageRef: plan.storageRef,
+                size: copiedSize,
+                storedAtUS: storedAtUS,
+                expiresAtUS: expiration.expiresAtUS,
+                expirationKind: expiration.kind,
+                expirationDurationUS: expiration.durationUS,
+                tags: options.tags
+            )
+
+            let commit = try metadataIndex.commitWrite(write, policy: policy, isFileLeased: diskLeaseCheck()) {
                 try diskFileStore.moveTemporaryFile(from: plan.temporaryURL, to: plan.storageRef)
             }
             diskFileStore.removeStorageRefsBestEffort(commit.removableStorageRefs)
@@ -319,6 +377,70 @@ actor CacheStoreEngine {
         }
 
         return record.info()
+    }
+
+    private func diskFileInfo(bucket: CacheBucketID, key: CacheKey) throws -> CacheEntryInfo? {
+        guard let record = try diskIndex().fetchEntry(bucket: bucket, key: key), record.payloadKind == .file else {
+            return nil
+        }
+
+        let now = configuration.clock.now()
+        if record.info().isExpired(at: now) {
+            if !isFileLeased(bucket: bucket, key: key) {
+                try removeDiskRecord(bucket: bucket, key: key)
+            }
+            return nil
+        }
+
+        return record.info()
+    }
+
+    private func diskLeaseFile(bucket: CacheBucketID, key: CacheKey) throws -> CachedFileLease? {
+        guard let record = try diskIndex().fetchEntry(bucket: bucket, key: key), record.payloadKind == .file else {
+            return nil
+        }
+
+        let now = configuration.clock.now()
+        if record.info().isExpired(at: now) {
+            if !isFileLeased(bucket: bucket, key: key) {
+                try removeDiskRecord(bucket: bucket, key: key)
+            }
+            return nil
+        }
+
+        let diskFileStore = try diskStore()
+        let fileURL = diskFileStore.url(forStorageRef: record.storageRef)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            if !isFileLeased(bucket: bucket, key: key) {
+                try removeDiskRecord(bucket: bucket, key: key)
+            }
+            return nil
+        }
+
+        let accessedAtUS = CacheDateEncoding.microsecondsSinceEpoch(now)
+        let updatedExpiresAtUS: Int64?
+        switch record.expirationKind {
+        case .never, .fixed:
+            updatedExpiresAtUS = record.expiresAtUS
+        case .sliding:
+            guard let durationUS = record.expirationDurationUS else {
+                throw CacheError.internalInconsistency("Sliding expiration is missing its duration.")
+            }
+            updatedExpiresAtUS = try CacheDateEncoding.adding(durationUS, to: accessedAtUS)
+        }
+
+        try diskIndex().updateAccess(
+            entryID: record.id,
+            lastAccessedAtUS: accessedAtUS,
+            expiresAtUS: updatedExpiresAtUS
+        )
+
+        let token = leaseTable.acquire(LeaseIdentity(bucket: bucket, key: key))
+        return CachedFileLease(
+            url: fileURL,
+            info: record.info(lastAccessedAtUS: accessedAtUS, expiresAtUS: updatedExpiresAtUS),
+            token: token
+        )
     }
 
     private func diskData(bucket: CacheBucketID, key: CacheKey) async throws -> CachedData? {
@@ -405,6 +527,40 @@ actor CacheStoreEngine {
                 bucket: bucket,
                 constraint: .totalSize(requiredBytes: size, availableEvictableBytes: .zero)
             )
+        }
+    }
+
+    private func resolvedFileExtension(sourceURL: URL, options: CacheFileOptions) throws -> String {
+        if let explicitExtension = try CacheValidation.normalizedFileExtensionForInput(options.fileExtension) {
+            return explicitExtension
+        }
+
+        let sourceExtension = sourceURL.pathExtension
+        if !sourceExtension.isEmpty,
+           let normalizedSourceExtension = CacheValidation.normalizedFileExtensionIfValid(sourceExtension) {
+            return normalizedSourceExtension
+        }
+
+        return "bin"
+    }
+
+    private func throwIfExistingFileIsLeased(bucket: CacheBucketID, key: CacheKey) throws {
+        guard let record = try diskIndex().fetchEntry(bucket: bucket, key: key), record.payloadKind == .file else {
+            return
+        }
+        if isFileLeased(bucket: bucket, key: key) {
+            throw CacheError.fileIsLeased(bucket: bucket, key: key)
+        }
+    }
+
+    private func isFileLeased(bucket: CacheBucketID, key: CacheKey) -> Bool {
+        leaseTable.isLeased(LeaseIdentity(bucket: bucket, key: key))
+    }
+
+    private func diskLeaseCheck() -> DiskFileLeaseCheck {
+        let leaseTable = self.leaseTable
+        return { bucket, key in
+            leaseTable.isLeased(LeaseIdentity(bucket: bucket, key: key))
         }
     }
 

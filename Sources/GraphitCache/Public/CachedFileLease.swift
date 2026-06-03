@@ -11,16 +11,21 @@ public final class CachedFileLease: Sendable {
     /// Metadata describing the leased file entry.
     public let info: CacheEntryInfo
 
-    init(url: URL, info: CacheEntryInfo) {
+    private let token: LeaseToken
+
+    init(url: URL, info: CacheEntryInfo, token: LeaseToken) {
         self.url = url
         self.info = info
+        self.token = token
     }
 
     /// Releases the lease.
     ///
     /// Calling `release()` more than once is safe. Callers should release explicitly when they are
     /// finished using the file URL; `deinit` is only a safety net.
-    public func release() {}
+    public func release() {
+        token.release()
+    }
 
     deinit {
         release()

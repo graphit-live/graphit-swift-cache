@@ -76,6 +76,10 @@ internal enum CacheValidation {
         return try normalizedFileExtension(fileExtension, error: CacheError.invalidInput)
     }
 
+    static func normalizedFileExtensionIfValid(_ fileExtension: String) -> String? {
+        try? normalizedFileExtension(fileExtension, error: CacheError.invalidInput)
+    }
+
     private static func validateBucketID(
         _ id: CacheBucketID,
         error: (String) -> CacheError
