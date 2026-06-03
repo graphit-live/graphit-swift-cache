@@ -1,12 +1,20 @@
 import Foundation
 
 actor CacheStoreEngine {
-    private static let unimplementedStorageMessage = "Cache storage behavior is not implemented in the bootstrap API shell."
+    private static let unimplementedStorageMessage = "This storage behavior is not implemented yet."
 
     private let configuration: CacheStoreConfiguration
+    private let bucketPolicies: [CacheBucketID: BucketPolicy]
+    private var memory = MemoryCacheEngine()
 
     init(configuration: CacheStoreConfiguration) {
         self.configuration = configuration
+
+        var bucketPolicies: [CacheBucketID: BucketPolicy] = [:]
+        for bucket in configuration.buckets {
+            bucketPolicies[bucket.id] = bucket.policy
+        }
+        self.bucketPolicies = bucketPolicies
     }
 
     func usage() -> CacheUsage {
@@ -41,11 +49,14 @@ actor CacheStoreEngine {
     }
 
     func removeAll() -> CacheRemovalResult {
-        .empty
+        memory.removeAll()
     }
 
     func removeAll(in bucket: CacheBucketID) -> CacheRemovalResult {
-        .empty
+        guard bucketPolicies[bucket]?.storage == .memoryOnly else {
+            return .empty
+        }
+        return memory.removeAll(in: bucket)
     }
 
     func removeAll(tagged tag: CacheTag) -> CacheRemovalResult {
@@ -65,7 +76,10 @@ actor CacheStoreEngine {
     }
 
     func dataInfo(bucket: CacheBucketID, key: CacheKey) -> CacheEntryInfo? {
-        nil
+        guard bucketPolicies[bucket]?.storage == .memoryOnly else {
+            return nil
+        }
+        return memory.dataInfo(bucket: bucket, key: key)
     }
 
     func fileInfo(bucket: CacheBucketID, key: CacheKey, policy: BucketPolicy) throws -> CacheEntryInfo? {
@@ -74,11 +88,30 @@ actor CacheStoreEngine {
     }
 
     func data(bucket: CacheBucketID, key: CacheKey) -> CachedData? {
-        nil
+        guard bucketPolicies[bucket]?.storage == .memoryOnly else {
+            return nil
+        }
+        return memory.data(bucket: bucket, key: key)
     }
 
     func setData(_ data: Data, bucket: CacheBucketID, key: CacheKey, options: CacheEntryOptions) throws {
-        throw CacheError.storageFailure(Self.unimplementedStorageMessage)
+        guard let policy = bucketPolicies[bucket] else {
+            throw CacheError.unknownBucket(bucket)
+        }
+
+        switch policy.storage {
+        case .memoryOnly:
+            try memory.setData(
+                data,
+                bucket: bucket,
+                key: key,
+                policy: policy,
+                tags: options.tags,
+                storedAt: configuration.clock.now()
+            )
+        case .diskBacked:
+            throw CacheError.storageFailure(Self.unimplementedStorageMessage)
+        }
     }
 
     func leaseFile(bucket: CacheBucketID, key: CacheKey, policy: BucketPolicy) throws -> CachedFileLease? {
@@ -98,7 +131,10 @@ actor CacheStoreEngine {
     }
 
     func remove(bucket: CacheBucketID, key: CacheKey) -> CacheRemovalResult {
-        .empty
+        guard bucketPolicies[bucket]?.storage == .memoryOnly else {
+            return .empty
+        }
+        return memory.remove(bucket: bucket, key: key)
     }
 
     private func requireFileStorage(_ policy: BucketPolicy) throws {
