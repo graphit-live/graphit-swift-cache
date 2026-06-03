@@ -28,14 +28,15 @@ If implementation shifts from this task/spec, stop and align before continuing.
 - one `CacheKey` type; one key maps to one data or file entry.
 - bucket vs tag.
 - no public kind/content-type API; apps can use tags if needed.
-- memory-only vs disk-backed.
+- memory-only vs disk-backed as bucket-level storage modes.
+- `CacheStoreConfiguration` has one initializer; callers pass `rootDirectory: nil` for all-memory configurations and a file URL root for disk-backed or mixed configurations.
 - every bucket requires `maxTotalSize`.
 - LRU vs oldest-inserted-first eviction.
 - usage reports are intentionally simple.
 - cleanup is explicit manual maintenance; no automatic full startup cleanup.
 - `removeAll(in:)` can remove old/unconfigured buckets for migrations.
-- disk-backed init performs bounded synchronous local filesystem/SQLite setup.
-- one active disk-backed `CacheStore` per root; v1 does not coordinate multiple active stores sharing a root.
+- when disk-backed buckets are present, initialization performs bounded synchronous local filesystem/SQLite setup.
+- one active `CacheStore` with disk-backed buckets per root; v1 does not coordinate multiple active stores sharing a root.
 - disk-backed Data writes and file imports use internal off-actor I/O helpers.
 - cached file URLs are lease-only and cache-managed.
 - file leases must be retained for playback/long reads.

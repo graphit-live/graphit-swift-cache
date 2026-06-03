@@ -5,7 +5,7 @@ SQLite stores metadata only. Data and file payload bytes live in filesystem. `st
 ## Connection
 
 - Actor-owned/non-Sendable `SQLiteConnection` inside `CacheStoreEngine`.
-- Open at disk-backed store init.
+- Open during `CacheStore` initialization when disk-backed buckets are present.
 - `PRAGMA foreign_keys = ON;`
 - `PRAGMA journal_mode = WAL;`
 - `PRAGMA synchronous = NORMAL;`

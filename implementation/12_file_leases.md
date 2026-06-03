@@ -31,7 +31,7 @@ internal final class LeaseToken: Sendable {
 
 `LeaseIdentity` is internal and includes bucket + raw key. Public API does not expose payload kind.
 
-The lease table is store-local. V1 expects one active disk-backed `CacheStore` per root; multiple active stores sharing a root could bypass each other's lease table and are unsupported instead of adding hidden global coordination.
+The lease table is store-local. V1 expects one active `CacheStore` with disk-backed buckets per root; multiple active stores sharing a root could bypass each other's lease table and are unsupported instead of adding hidden global coordination.
 
 Why lock table, not actor: `deinit` cannot `await`; no unstructured task allowed. State is tiny and synchronous. V1 targets iOS 18/macOS 15, so `Synchronization.Mutex` is available.
 

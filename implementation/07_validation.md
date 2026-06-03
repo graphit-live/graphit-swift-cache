@@ -37,10 +37,11 @@ Do not support a special zero-size max-item edge case in v1. It is niche and com
 
 - bucket IDs unique for configured active buckets.
 - root `nil` valid only if every bucket is `.memoryOnly`.
+- root non-`nil` requires at least one `.diskBacked` bucket; all-memory stores must use `nil`.
 - disk-backed root must be a file URL.
 - `.diskBacked` buckets require root.
-- disk-backed init creates root/index/buckets/tmp dirs or throws `storageFailure`.
-- operational contract: one active disk-backed `CacheStore` per root; v1 does not add hidden global registries or cross-store locks.
+- when disk-backed buckets are present, init creates root/index/buckets/tmp dirs or throws `storageFailure`.
+- operational contract: one active `CacheStore` with disk-backed buckets per root; v1 does not add hidden global registries or cross-store locks.
 - `bucket(_:)` throws `unknownBucket` for unconfigured buckets.
 - `removeAll(in:)` validates the bucket ID shape but may target an old/unconfigured bucket under the store root.
 

@@ -142,4 +142,4 @@ return public result
 - No public `close()` in v1.
 - `CacheStore` creates the engine; `CacheBucket` handles also retain it so bucket handles remain usable when passed around.
 - SQLite/file handles should have internal deterministic cleanup through ownership/deinit when no public handles retain the engine, but callers do not manage shutdown.
-- Disk-backed lease and removal coordination is store-local; v1 expects one active disk-backed store per root instead of hidden global coordination.
+- Disk-backed lease and removal coordination is store-local; v1 expects one active `CacheStore` with disk-backed buckets per root instead of hidden global coordination.

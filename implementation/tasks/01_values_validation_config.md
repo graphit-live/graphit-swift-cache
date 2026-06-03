@@ -59,6 +59,6 @@ swift test --filter Clock
 
 ## Definition of done
 
-- Validation tests cover bucket ID whitelist and length <= 128, key/tag rules, file extension rules, root rules, duplicate buckets, size/count/duration limits.
+- Validation tests cover bucket ID whitelist and length <= 128, key/tag rules, file extension rules, disk root required for disk-backed buckets, all-memory stores reject non-`nil` roots, duplicate buckets, size/count/duration limits.
 - Public values conform exactly as specified.
 - Runtime storage/eviction modes do not accidentally conform to `Codable`.

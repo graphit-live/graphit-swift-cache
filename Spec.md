@@ -381,28 +381,18 @@ public struct CacheStoreConfiguration: Sendable {
         clock: any CacheClock = SystemCacheClock()
     )
 }
-
-public extension CacheStoreConfiguration {
-    static func memoryOnly(
-        buckets: [BucketConfiguration],
-        clock: any CacheClock = SystemCacheClock()
-    ) -> CacheStoreConfiguration
-
-    static func diskBacked(
-        rootDirectory: URL,
-        buckets: [BucketConfiguration],
-        clock: any CacheClock = SystemCacheClock()
-    ) -> CacheStoreConfiguration
-}
 ```
+
+Storage mode is bucket-level. `CacheStoreConfiguration` has one initializer so callers explicitly provide either a disk root or `nil`. Use `rootDirectory: nil` for all-memory configurations. Use a file URL root for any configuration that includes a `.diskBacked` bucket, including mixed memory/disk configurations.
 
 Rules:
 
 - `rootDirectory == nil` is valid only if every bucket is `.memoryOnly`.
+- `rootDirectory != nil` requires at least one `.diskBacked` bucket; all-memory stores must use `nil`.
 - `.diskBacked` buckets require a file URL root directory.
-- A disk root is owned by one active disk-backed `CacheStore` instance at a time. V1 does not coordinate leases or removal across multiple stores sharing the same root.
+- A disk root is owned by one active `CacheStore` instance with disk-backed buckets at a time. V1 does not coordinate leases or removal across multiple stores sharing the same root.
 - Bucket IDs must be unique.
-- Disk-backed init performs bounded synchronous local filesystem and SQLite setup.
+- When disk-backed buckets are present, initialization performs bounded synchronous local filesystem and SQLite setup.
 - No full cleanup runs automatically at startup.
 
 ### 5.8 Entry options
@@ -672,8 +662,9 @@ No low-level non-Sendable `Error` associated values.
 - all buckets have nonnegative, nonzero `maxTotalSize`;
 - optional limits are valid;
 - `.diskBacked` buckets require a file URL root;
-- memory-only-only stores may omit root;
-- disk-backed init creates required directories and SQLite schema.
+- all-memory stores must omit the root;
+- a non-`nil` root requires at least one `.diskBacked` bucket;
+- when disk-backed buckets are present, initialization creates required directories and SQLite schema.
 
 ### 6.2 Data writes
 
@@ -819,7 +810,7 @@ bucket.remove(key)
 
 There is no public `close()` in v1. Cache resources are released when no `CacheStore` or `CacheBucket` handles still reference them.
 
-Disk-backed stores should not share a root with another active `CacheStore`. V1 lease and removal coordination is store-local, not cross-store or cross-process.
+Stores with disk-backed buckets should not share a root with another active `CacheStore`. V1 lease and removal coordination is store-local, not cross-store or cross-process.
 
 ### 6.12 Cancellation
 
@@ -933,7 +924,7 @@ Same-key replacement changes the payload kind if needed:
 ### 9.1 Configure disk-backed app cache
 
 ```swift
-let cache = try CacheStore(configuration: .diskBacked(
+let cache = try CacheStore(configuration: .init(
     rootDirectory: cacheDirectory,
     buckets: [
         .init(
@@ -961,7 +952,8 @@ let cache = try CacheStore(configuration: .diskBacked(
 ### 9.2 Memory-only cache
 
 ```swift
-let cache = try CacheStore(configuration: .memoryOnly(
+let cache = try CacheStore(configuration: .init(
+    rootDirectory: nil,
     buckets: [
         .init(
             id: CacheBucketID("calculations"),

@@ -27,12 +27,12 @@ The extension is for file-path usability only. It is not MIME/content-type metad
 
 ## Directory creation
 
-At disk-backed init:
+During `CacheStore` initialization when disk-backed buckets are present:
 
 - create root/index/buckets/tmp.
 - apply backup exclusion best-effort to created dirs.
 - no Documents default; caller supplies root.
-- one active disk-backed `CacheStore` owns the root at a time; v1 does not coordinate multiple stores sharing a root.
+- one active `CacheStore` with disk-backed buckets owns the root at a time; v1 does not coordinate multiple stores sharing a root.
 
 Backup exclusion:
 

@@ -87,16 +87,18 @@ public struct CacheStoreConfiguration: Sendable {
     public var clock: any CacheClock
     public init(rootDirectory: URL?, buckets: [BucketConfiguration], clock: any CacheClock = SystemCacheClock())
 }
-
-public extension CacheStoreConfiguration {
-    static func memoryOnly(buckets: [BucketConfiguration], clock: any CacheClock = SystemCacheClock()) -> CacheStoreConfiguration
-    static func diskBacked(rootDirectory: URL, buckets: [BucketConfiguration], clock: any CacheClock = SystemCacheClock()) -> CacheStoreConfiguration
-}
 ```
+
+Storage mode is bucket-level. `CacheStoreConfiguration` has one initializer so callers explicitly provide either a disk root or `nil`. Use `rootDirectory: nil` for all-memory configurations. Use a file URL root for any configuration that includes a `.diskBacked` bucket, including mixed memory/disk configurations. Do not add store-level `memoryOnly(...)` or `diskBacked(...)` conveniences because they imply a store-level mode and cannot enforce bucket-policy correctness.
 
 No startup-cleanup configuration in v1. Apps call `cleanup()` explicitly.
 
-Disk-backed roots are store-owned while active: v1 expects one active disk-backed `CacheStore` per root. Multiple active stores sharing one root are unsupported because leases and removal coordination are store-local.
+Rules:
+
+- `rootDirectory == nil` is valid only if every bucket is `.memoryOnly`.
+- `rootDirectory != nil` requires at least one `.diskBacked` bucket; all-memory stores must use `nil`.
+- `.diskBacked` buckets require a file URL root directory.
+- disk-backed roots are store-owned while active: v1 expects one active `CacheStore` with disk-backed buckets per root. Multiple active stores sharing one root are unsupported because leases and removal coordination are store-local.
 
 ## Entry options
 

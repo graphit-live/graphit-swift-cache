@@ -69,7 +69,7 @@ Public storage modes are only `.memoryOnly` and `.diskBacked`.
 
 - `.memoryOnly`: process-local authoritative memory storage for `Data` entries only.
 - `.diskBacked`: filesystem payload storage plus SQLite metadata for `Data` and file entries.
-- A disk root is owned by one active disk-backed `CacheStore` instance at a time; v1 does not coordinate leases/removal across multiple stores or processes sharing one root.
+- A disk root is owned by one active `CacheStore` instance with disk-backed buckets at a time; v1 does not coordinate leases/removal across multiple stores or processes sharing one root.
 - No hot memory tier for disk-backed buckets in v1.
 - `CacheStorageMode` is not `Codable` in v1.
 
@@ -202,6 +202,14 @@ public let configuration: CacheStoreConfiguration
 ```
 
 Internals use validated normalized config. `CacheBucket` stores a validated policy snapshot so `bucket(_:)` stays synchronous.
+
+Storage mode is bucket-level, not store-level. `CacheStoreConfiguration` has one designated initializer only. Do not add store-level `.memoryOnly(...)` or `.diskBacked(...)` conveniences because they imply a store-level mode and cannot enforce bucket-policy correctness.
+
+Root rules:
+
+- `rootDirectory == nil` is valid only when every bucket is `.memoryOnly`.
+- `rootDirectory != nil` requires at least one `.diskBacked` bucket; all-memory stores must use `nil`.
+- use the designated initializer for every configuration.
 
 ## File leases
 
