@@ -41,9 +41,20 @@ import Testing
     #expect(info?.lastAccessedAt == nil)
     #expect(info?.expiresAt == nil)
 
+    let readAt = Date(timeIntervalSince1970: 1_001)
+    clock.setNow(readAt)
     let cached = try await bucket.data(key)
     #expect(cached?.data == payload)
-    #expect(cached?.info == info)
+    #expect(cached?.info.bucket == bucket.id)
+    #expect(cached?.info.key == key)
+    #expect(cached?.info.size == .bytes(4))
+    #expect(cached?.info.storedAt == storedAt)
+    #expect(cached?.info.tags == tags)
+    #expect(cached?.info.lastAccessedAt == readAt)
+    #expect(cached?.info.expiresAt == nil)
+
+    let infoAfterRead = try await bucket.dataInfo(for: key)
+    #expect(infoAfterRead?.lastAccessedAt == readAt)
 
     let result = try await bucket.remove(key)
     #expect(result == CacheRemovalResult(removedEntries: 1, removedBytes: .bytes(4)))
@@ -70,12 +81,17 @@ import Testing
         options: CacheEntryOptions(tags: [CacheTag("new")])
     )
 
+    let replacementInfo = try await bucket.dataInfo(for: key)
+    #expect(replacementInfo?.size == .bytes(3))
+    #expect(replacementInfo?.storedAt == Date(timeIntervalSince1970: 20))
+    #expect(replacementInfo?.tags == [CacheTag("new")])
+    #expect(replacementInfo?.lastAccessedAt == nil)
+
+    let readAt = Date(timeIntervalSince1970: 21)
+    clock.setNow(readAt)
     let cached = try await bucket.data(key)
     #expect(cached?.data == Data([2, 2, 2]))
-    #expect(cached?.info.size == .bytes(3))
-    #expect(cached?.info.storedAt == Date(timeIntervalSince1970: 20))
-    #expect(cached?.info.tags == [CacheTag("new")])
-    #expect(cached?.info.lastAccessedAt == nil)
+    #expect(cached?.info.lastAccessedAt == readAt)
 
     let result = try await bucket.remove(key)
     #expect(result == CacheRemovalResult(removedEntries: 1, removedBytes: .bytes(3)))
@@ -139,7 +155,7 @@ import Testing
     #expect(try await bucket.data(key)?.data == payload)
 }
 
-@Test func memorySetDataEnforcesSimpleCapacityChecks() async throws {
+@Test func memorySetDataEnforcesItemLimitAndEvictsForTotalCapacity() async throws {
     let itemLimitedBucket = try makeMemoryBucket(policy: .memoryOnly(maxTotalSize: .bytes(10), maxItemSize: .bytes(2)))
 
     await expectCacheError({
@@ -150,18 +166,22 @@ import Testing
 
     let totalLimitedBucket = try makeMemoryBucket(policy: .memoryOnly(maxTotalSize: .bytes(4)))
     try await totalLimitedBucket.setData(Data([1, 2]), for: CacheKey("first"))
+    try await totalLimitedBucket.setData(Data([3, 4, 5]), for: CacheKey("second"))
+
+    #expect(try await totalLimitedBucket.data(CacheKey("first")) == nil)
+    #expect(try await totalLimitedBucket.data(CacheKey("second"))?.data == Data([3, 4, 5]))
 
     await expectCacheError({
-        try await totalLimitedBucket.setData(Data([3, 4, 5]), for: CacheKey("second"))
+        try await totalLimitedBucket.setData(Data([6, 7, 8, 9, 10]), for: CacheKey("impossible"))
     }) { error in
         if case .capacityCannotBeSatisfied(let bucket, .totalSize(let requiredBytes, let availableEvictableBytes)) = error {
-            bucket == totalLimitedBucket.id && requiredBytes == .bytes(3) && availableEvictableBytes == .zero
+            bucket == totalLimitedBucket.id && requiredBytes == .bytes(5) && availableEvictableBytes == .zero
         } else {
             false
         }
     }
 
-    #expect(try await totalLimitedBucket.data(CacheKey("second")) == nil)
+    #expect(try await totalLimitedBucket.data(CacheKey("impossible")) == nil)
 }
 
 private func makeMemoryStore(
