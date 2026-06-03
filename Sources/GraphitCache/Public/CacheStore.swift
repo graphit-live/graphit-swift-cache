@@ -15,14 +15,16 @@ public final class CacheStore: Sendable {
     /// - Parameter configuration: The configuration used to create the store.
     /// - Throws: A `CacheError` if configuration or storage setup fails.
     public init(configuration: CacheStoreConfiguration) throws {
+        try CacheValidation.validateConfiguration(configuration)
+
         self.configuration = configuration
-        self.engine = CacheStoreEngine(configuration: configuration)
 
         var bucketPolicies: [CacheBucketID: BucketPolicy] = [:]
         for bucket in configuration.buckets {
             bucketPolicies[bucket.id] = bucket.policy
         }
         self.bucketPolicies = bucketPolicies
+        self.engine = CacheStoreEngine(configuration: configuration)
     }
 
     /// Returns a handle for a configured active bucket.
@@ -77,7 +79,8 @@ public final class CacheStore: Sendable {
     /// - Returns: A removal result describing removed entries and skipped leases.
     /// - Throws: A `CacheError` if the bucket ID is invalid or removal fails.
     public func removeAll(in bucket: CacheBucketID) async throws -> CacheRemovalResult {
-        await engine.removeAll(in: bucket)
+        try CacheValidation.validateBucketIDForInput(bucket)
+        return await engine.removeAll(in: bucket)
     }
 
     /// Removes all entries tagged with a specific tag.
@@ -86,7 +89,8 @@ public final class CacheStore: Sendable {
     /// - Returns: A removal result describing removed entries and skipped leases.
     /// - Throws: A `CacheError` if removal fails.
     public func removeAll(tagged tag: CacheTag) async throws -> CacheRemovalResult {
-        await engine.removeAll(tagged: tag)
+        try CacheValidation.validateTagForInput(tag)
+        return await engine.removeAll(tagged: tag)
     }
 
     /// Removes all entries stored before a date.

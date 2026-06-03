@@ -27,7 +27,8 @@ public struct CacheBucket: Sendable {
     /// - Returns: Entry metadata when a current data entry exists, or `nil` when absent.
     /// - Throws: A `CacheError` if the lookup fails.
     public func dataInfo(for key: CacheKey) async throws -> CacheEntryInfo? {
-        await engine.dataInfo(bucket: id, key: key)
+        try CacheValidation.validateKeyForInput(key)
+        return await engine.dataInfo(bucket: id, key: key)
     }
 
     /// Returns metadata for a file entry without leasing or reading payload bytes.
@@ -38,7 +39,8 @@ public struct CacheBucket: Sendable {
     /// - Returns: Entry metadata when a current file entry exists, or `nil` when absent.
     /// - Throws: A `CacheError` if the lookup fails.
     public func fileInfo(for key: CacheKey) async throws -> CacheEntryInfo? {
-        try await engine.fileInfo(bucket: id, key: key, policy: policy)
+        try CacheValidation.validateKeyForInput(key)
+        return try await engine.fileInfo(bucket: id, key: key, policy: policy)
     }
 
     /// Returns cached data for a key.
@@ -49,7 +51,8 @@ public struct CacheBucket: Sendable {
     /// - Returns: Cached data when a current data entry exists, or `nil` when absent.
     /// - Throws: A `CacheError` if the read fails.
     public func data(_ key: CacheKey) async throws -> CachedData? {
-        await engine.data(bucket: id, key: key)
+        try CacheValidation.validateKeyForInput(key)
+        return await engine.data(bucket: id, key: key)
     }
 
     /// Stores data for a key.
@@ -62,6 +65,8 @@ public struct CacheBucket: Sendable {
     ///   - options: Tags and other data-entry options.
     /// - Throws: A `CacheError` if the write fails.
     public func setData(_ data: Data, for key: CacheKey, options: CacheEntryOptions = .init()) async throws {
+        try CacheValidation.validateKeyForInput(key)
+        try CacheValidation.validateEntryOptionsForInput(options)
         try await engine.setData(data, bucket: id, key: key, options: options)
     }
 
@@ -73,7 +78,8 @@ public struct CacheBucket: Sendable {
     /// - Returns: A file lease when a current file entry exists, or `nil` when absent.
     /// - Throws: A `CacheError` if leasing fails or file storage is unsupported.
     public func leaseFile(_ key: CacheKey) async throws -> CachedFileLease? {
-        try await engine.leaseFile(bucket: id, key: key, policy: policy)
+        try CacheValidation.validateKeyForInput(key)
+        return try await engine.leaseFile(bucket: id, key: key, policy: policy)
     }
 
     /// Imports a local file into the cache.
@@ -86,6 +92,10 @@ public struct CacheBucket: Sendable {
     ///   - options: Tags and file path extension options.
     /// - Throws: A `CacheError` if the import fails or file storage is unsupported.
     public func setFile(at sourceURL: URL, for key: CacheKey, options: CacheFileOptions = .init()) async throws {
+        try CacheValidation.validateKeyForInput(key)
+        if policy.storage != .memoryOnly {
+            try CacheValidation.validateFileOptionsForInput(options)
+        }
         try await engine.setFile(at: sourceURL, bucket: id, key: key, options: options, policy: policy)
     }
 
@@ -95,7 +105,8 @@ public struct CacheBucket: Sendable {
     /// - Returns: A removal result describing the removed entry.
     /// - Throws: A `CacheError` if removal fails or the current file is leased.
     public func remove(_ key: CacheKey) async throws -> CacheRemovalResult {
-        await engine.remove(bucket: id, key: key)
+        try CacheValidation.validateKeyForInput(key)
+        return await engine.remove(bucket: id, key: key)
     }
 
     /// Removes all entries in this bucket.
@@ -112,7 +123,8 @@ public struct CacheBucket: Sendable {
     /// - Returns: A removal result describing removed entries and skipped leases.
     /// - Throws: A `CacheError` if removal fails.
     public func removeAll(tagged tag: CacheTag) async throws -> CacheRemovalResult {
-        await engine.removeAll(in: id, tagged: tag)
+        try CacheValidation.validateTagForInput(tag)
+        return await engine.removeAll(in: id, tagged: tag)
     }
 
     /// Removes all entries in this bucket stored before a date.
