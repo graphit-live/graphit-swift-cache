@@ -91,9 +91,10 @@ Same key replaces previous entry.
 
 ## Corruption/orphan handling
 
-- temp files: remove on manual cleanup.
+- temp files: remove on store cleanup; bucket cleanup does not remove store-level temp files.
 - file without metadata: remove as orphan.
-- metadata without file: remove metadata; read returns nil.
+- metadata without file: remove metadata when unleased; read returns nil.
+- metadata for a missing leased file payload is retained until release; new reads/leases return nil and cleanup skips/counts it.
 - unreadable file: remove if safe or throw mapped storage error.
 
 ## Verification

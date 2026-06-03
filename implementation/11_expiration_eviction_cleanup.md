@@ -17,6 +17,8 @@ Persist resolved expiration mode/duration/expires. Future bucket config changes 
 - missing -> nil.
 - wrong payload shape for requested API -> nil.
 - expired -> lazy remove/repair + nil.
+- missing unleased payload metadata -> lazy repair + nil.
+- missing leased file payload metadata -> nil, but repair is deferred until release.
 - fixed -> no extension.
 - sliding payload read -> update `lastAccessedAt` and `expiresAt = now + duration`.
 - `dataInfo`/`fileInfo` do not update access metadata or sliding expiration.
@@ -63,6 +65,10 @@ Cleanup tasks:
 2. orphan temp/final files.
 3. metadata rows with missing files.
 4. capacity enforcement per configured bucket.
+
+`CacheStore.cleanup()` may remove store-level temp orphans. `CacheBucket.cleanup()` is bucket-scoped and does not remove store-level temp files.
+
+Metadata rows with missing payload files are removed when unleased. If the missing payload is a leased file, cleanup skips/counts it and repair can happen after release.
 
 No automatic full startup cleanup.
 

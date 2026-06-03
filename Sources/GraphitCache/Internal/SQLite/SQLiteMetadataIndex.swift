@@ -65,6 +65,23 @@ internal struct DiskWriteCommitResult: Sendable {
     }
 }
 
+internal struct DiskLeasedEntryIdentity: Hashable, Sendable {
+    let bucket: CacheBucketID
+    let key: CacheKey
+}
+
+internal struct DiskRemovalOutcome: Sendable {
+    let removal: CacheRemovalResult
+    let storageRefs: [String]
+    let skippedLeasedEntries: Set<DiskLeasedEntryIdentity>
+
+    static let empty = DiskRemovalOutcome(
+        removal: .empty,
+        storageRefs: [],
+        skippedLeasedEntries: []
+    )
+}
+
 internal typealias DiskFileLeaseCheck = (CacheBucketID, CacheKey) -> Bool
 
 private enum LeasedRemovalHandling {
@@ -148,21 +165,36 @@ internal final class SQLiteMetadataIndex {
         bucket: CacheBucketID,
         key: CacheKey,
         isFileLeased: DiskFileLeaseCheck = { _, _ in false }
-    ) throws -> (CacheRemovalResult, [String]) {
+    ) throws -> DiskRemovalOutcome {
         guard let record = try fetchEntryWithoutTags(bucket: bucket, key: key) else {
-            return (.empty, [])
+            return .empty
         }
         return try remove(records: [record], leasedHandling: .throwIfLeased, isFileLeased: isFileLeased)
     }
 
-    func removeAll(isFileLeased: DiskFileLeaseCheck = { _, _ in false }) throws -> (CacheRemovalResult, [String]) {
+    func removeEntry(
+        bucket: CacheBucketID,
+        key: CacheKey,
+        matchingStorageRef storageRef: String,
+        isFileLeased: DiskFileLeaseCheck = { _, _ in false }
+    ) throws -> DiskRemovalOutcome {
+        guard let record = try fetchEntryWithoutTags(bucket: bucket, key: key) else {
+            return .empty
+        }
+        guard record.storageRef == storageRef else {
+            return .empty
+        }
+        return try remove(records: [record], leasedHandling: .skipAndReport, isFileLeased: isFileLeased)
+    }
+
+    func removeAll(isFileLeased: DiskFileLeaseCheck = { _, _ in false }) throws -> DiskRemovalOutcome {
         try remove(records: allRecords(), leasedHandling: .skipAndReport, isFileLeased: isFileLeased)
     }
 
     func removeAll(
         in bucket: CacheBucketID,
         isFileLeased: DiskFileLeaseCheck = { _, _ in false }
-    ) throws -> (CacheRemovalResult, [String]) {
+    ) throws -> DiskRemovalOutcome {
         let sql = "SELECT \(Self.entryColumns) FROM entries WHERE bucket = ?;"
         let selected = try records(sql: sql, includeTags: false) { statement in
             try statement.bindText(bucket.rawValue, at: 1)
@@ -173,7 +205,7 @@ internal final class SQLiteMetadataIndex {
     func removeAll(
         tagged tag: CacheTag,
         isFileLeased: DiskFileLeaseCheck = { _, _ in false }
-    ) throws -> (CacheRemovalResult, [String]) {
+    ) throws -> DiskRemovalOutcome {
         let sql = """
         SELECT \(Self.entryColumns)
         FROM entries
@@ -190,7 +222,7 @@ internal final class SQLiteMetadataIndex {
         in bucket: CacheBucketID,
         tagged tag: CacheTag,
         isFileLeased: DiskFileLeaseCheck = { _, _ in false }
-    ) throws -> (CacheRemovalResult, [String]) {
+    ) throws -> DiskRemovalOutcome {
         let sql = """
         SELECT \(Self.entryColumns)
         FROM entries
@@ -207,7 +239,7 @@ internal final class SQLiteMetadataIndex {
     func removeAll(
         insertedBefore date: Date,
         isFileLeased: DiskFileLeaseCheck = { _, _ in false }
-    ) throws -> (CacheRemovalResult, [String]) {
+    ) throws -> DiskRemovalOutcome {
         let cutoff = CacheDateEncoding.microsecondsSinceEpoch(date)
         let sql = "SELECT \(Self.entryColumns) FROM entries WHERE stored_at_us < ?;"
         let selected = try records(sql: sql, includeTags: false) { statement in
@@ -220,7 +252,7 @@ internal final class SQLiteMetadataIndex {
         in bucket: CacheBucketID,
         insertedBefore date: Date,
         isFileLeased: DiskFileLeaseCheck = { _, _ in false }
-    ) throws -> (CacheRemovalResult, [String]) {
+    ) throws -> DiskRemovalOutcome {
         let cutoff = CacheDateEncoding.microsecondsSinceEpoch(date)
         let sql = "SELECT \(Self.entryColumns) FROM entries WHERE bucket = ? AND stored_at_us < ?;"
         let selected = try records(sql: sql, includeTags: false) { statement in
@@ -253,6 +285,123 @@ internal final class SQLiteMetadataIndex {
         )
     }
 
+    func storageRefs() throws -> Set<String> {
+        try Set(storageRefs(sql: "SELECT storage_ref FROM entries;") { _ in })
+    }
+
+    func storageRefs(in bucket: CacheBucketID) throws -> Set<String> {
+        try Set(storageRefs(sql: "SELECT storage_ref FROM entries WHERE bucket = ?;") { statement in
+            try statement.bindText(bucket.rawValue, at: 1)
+        })
+    }
+
+    func removeExpired(
+        at date: Date,
+        isFileLeased: DiskFileLeaseCheck = { _, _ in false }
+    ) throws -> DiskRemovalOutcome {
+        let cutoff = CacheDateEncoding.microsecondsSinceEpoch(date)
+        let sql = "SELECT \(Self.entryColumns) FROM entries WHERE expires_at_us IS NOT NULL AND expires_at_us <= ?;"
+        let selected = try records(sql: sql, includeTags: false) { statement in
+            try statement.bindInt64(cutoff, at: 1)
+        }
+        return try remove(records: selected, leasedHandling: .skipAndReport, isFileLeased: isFileLeased)
+    }
+
+    func removeExpired(
+        in bucket: CacheBucketID,
+        at date: Date,
+        isFileLeased: DiskFileLeaseCheck = { _, _ in false }
+    ) throws -> DiskRemovalOutcome {
+        let cutoff = CacheDateEncoding.microsecondsSinceEpoch(date)
+        let sql = "SELECT \(Self.entryColumns) FROM entries WHERE bucket = ? AND expires_at_us IS NOT NULL AND expires_at_us <= ?;"
+        let selected = try records(sql: sql, includeTags: false) { statement in
+            try statement.bindText(bucket.rawValue, at: 1)
+            try statement.bindInt64(cutoff, at: 2)
+        }
+        return try remove(records: selected, leasedHandling: .skipAndReport, isFileLeased: isFileLeased)
+    }
+
+    func removeEntriesWithMissingPayloads(
+        storageRefExists: (String) -> Bool,
+        isFileLeased: DiskFileLeaseCheck = { _, _ in false }
+    ) throws -> DiskRemovalOutcome {
+        let missing = try allRecords().filter { record in
+            !storageRefExists(record.storageRef)
+        }
+        return try remove(records: missing, leasedHandling: .skipAndReport, isFileLeased: isFileLeased)
+    }
+
+    func removeEntriesWithMissingPayloads(
+        in bucket: CacheBucketID,
+        storageRefExists: (String) -> Bool,
+        isFileLeased: DiskFileLeaseCheck = { _, _ in false }
+    ) throws -> DiskRemovalOutcome {
+        let sql = "SELECT \(Self.entryColumns) FROM entries WHERE bucket = ?;"
+        let records = try records(sql: sql, includeTags: false) { statement in
+            try statement.bindText(bucket.rawValue, at: 1)
+        }
+        let missing = records.filter { record in
+            !storageRefExists(record.storageRef)
+        }
+        return try remove(records: missing, leasedHandling: .skipAndReport, isFileLeased: isFileLeased)
+    }
+
+    func enforceCapacity(
+        in bucket: CacheBucketID,
+        policy: BucketPolicy,
+        isFileLeased: DiskFileLeaseCheck = { _, _ in false }
+    ) throws -> DiskRemovalOutcome {
+        let currentBytes = try scalarInt64(
+            sql: "SELECT COALESCE(SUM(size_bytes), 0) FROM entries WHERE bucket = ?;"
+        ) { statement in
+            try statement.bindText(bucket.rawValue, at: 1)
+        }
+        let currentCount = try scalarInt64(sql: "SELECT COUNT(*) FROM entries WHERE bucket = ?;") { statement in
+            try statement.bindText(bucket.rawValue, at: 1)
+        }
+        let bytesToFree = max(Int64(0), currentBytes - policy.maxTotalSize.bytes)
+        let entriesToFree: Int64
+        if let maxItemCount = policy.maxItemCount {
+            entriesToFree = max(Int64(0), currentCount - Int64(maxItemCount))
+        } else {
+            entriesToFree = 0
+        }
+
+        guard bytesToFree > 0 || entriesToFree > 0 else {
+            return .empty
+        }
+
+        let candidates = try evictionCandidates(in: bucket, policy: policy)
+        var victims: [DiskEntryRecord] = []
+        var freedBytes: Int64 = 0
+        var skippedLeasedEntries = Set<DiskLeasedEntryIdentity>()
+
+        for candidate in candidates {
+            if isLeasedFile(candidate, isFileLeased: isFileLeased) {
+                skippedLeasedEntries.insert(DiskLeasedEntryIdentity(bucket: candidate.bucket, key: candidate.key))
+                continue
+            }
+
+            victims.append(candidate)
+            freedBytes += candidate.size.bytes
+            if freedBytes >= bytesToFree && Int64(victims.count) >= entriesToFree {
+                break
+            }
+        }
+
+        let removal = try remove(records: victims, leasedHandling: .skipAndReport, isFileLeased: isFileLeased)
+        skippedLeasedEntries.formUnion(removal.skippedLeasedEntries)
+        return DiskRemovalOutcome(
+            removal: CacheRemovalResult(
+                removedEntries: removal.removal.removedEntries,
+                removedBytes: removal.removal.removedBytes,
+                skippedLeasedEntries: skippedLeasedEntries.count
+            ),
+            storageRefs: removal.storageRefs,
+            skippedLeasedEntries: skippedLeasedEntries
+        )
+    }
+
     private func fetchEntryWithoutTags(bucket: CacheBucketID, key: CacheKey) throws -> DiskEntryRecord? {
         let sql = "SELECT \(Self.entryColumns) FROM entries WHERE bucket = ? AND key = ? LIMIT 1;"
         return try records(sql: sql, includeTags: false) { statement in
@@ -273,20 +422,20 @@ internal final class SQLiteMetadataIndex {
         records selectedRecords: [DiskEntryRecord],
         leasedHandling: LeasedRemovalHandling,
         isFileLeased: DiskFileLeaseCheck
-    ) throws -> (CacheRemovalResult, [String]) {
+    ) throws -> DiskRemovalOutcome {
         guard !selectedRecords.isEmpty else {
-            return (.empty, [])
+            return .empty
         }
 
         var removableRecords: [DiskEntryRecord] = []
-        var skippedLeasedEntries = 0
+        var skippedLeasedEntries = Set<DiskLeasedEntryIdentity>()
         for record in selectedRecords {
             if isLeasedFile(record, isFileLeased: isFileLeased) {
                 switch leasedHandling {
                 case .throwIfLeased:
                     throw CacheError.fileIsLeased(bucket: record.bucket, key: record.key)
                 case .skipAndReport:
-                    skippedLeasedEntries += 1
+                    skippedLeasedEntries.insert(DiskLeasedEntryIdentity(bucket: record.bucket, key: record.key))
                     continue
                 }
             }
@@ -294,7 +443,11 @@ internal final class SQLiteMetadataIndex {
         }
 
         guard !removableRecords.isEmpty else {
-            return (CacheRemovalResult(skippedLeasedEntries: skippedLeasedEntries), [])
+            return DiskRemovalOutcome(
+                removal: CacheRemovalResult(skippedLeasedEntries: skippedLeasedEntries.count),
+                storageRefs: [],
+                skippedLeasedEntries: skippedLeasedEntries
+            )
         }
 
         try connection.transaction {
@@ -306,13 +459,14 @@ internal final class SQLiteMetadataIndex {
         let removedBytes = removableRecords.reduce(into: Int64(0)) { total, record in
             total += record.size.bytes
         }
-        return (
-            CacheRemovalResult(
+        return DiskRemovalOutcome(
+            removal: CacheRemovalResult(
                 removedEntries: removableRecords.count,
                 removedBytes: ByteCount.bytes(removedBytes),
-                skippedLeasedEntries: skippedLeasedEntries
+                skippedLeasedEntries: skippedLeasedEntries.count
             ),
-            removableRecords.map(\.storageRef)
+            storageRefs: removableRecords.map(\.storageRef),
+            skippedLeasedEntries: skippedLeasedEntries
         )
     }
 
@@ -396,24 +550,41 @@ internal final class SQLiteMetadataIndex {
         excluding excludedEntryID: String,
         policy: BucketPolicy
     ) throws -> [DiskEntryRecord] {
-        let ordering: String
-        switch policy.eviction {
-        case .leastRecentlyUsed:
-            ordering = "last_accessed_at_us IS NOT NULL ASC, last_accessed_at_us ASC, stored_at_us ASC, key ASC"
-        case .oldestInsertedFirst:
-            ordering = "stored_at_us ASC, key ASC"
-        }
-
         let sql = """
         SELECT \(Self.entryColumns)
         FROM entries
         WHERE bucket = ? AND id != ?
-        ORDER BY \(ordering);
+        ORDER BY \(evictionOrdering(for: policy));
         """
 
         return try records(sql: sql, includeTags: false) { statement in
             try statement.bindText(bucket.rawValue, at: 1)
             try statement.bindText(excludedEntryID, at: 2)
+        }
+    }
+
+    private func evictionCandidates(
+        in bucket: CacheBucketID,
+        policy: BucketPolicy
+    ) throws -> [DiskEntryRecord] {
+        let sql = """
+        SELECT \(Self.entryColumns)
+        FROM entries
+        WHERE bucket = ?
+        ORDER BY \(evictionOrdering(for: policy));
+        """
+
+        return try records(sql: sql, includeTags: false) { statement in
+            try statement.bindText(bucket.rawValue, at: 1)
+        }
+    }
+
+    private func evictionOrdering(for policy: BucketPolicy) -> String {
+        switch policy.eviction {
+        case .leastRecentlyUsed:
+            "last_accessed_at_us IS NOT NULL ASC, last_accessed_at_us ASC, stored_at_us ASC, key ASC"
+        case .oldestInsertedFirst:
+            "stored_at_us ASC, key ASC"
         }
     }
 
@@ -524,6 +695,23 @@ internal final class SQLiteMetadataIndex {
             tags.insert(CacheTag(tag))
         }
         return tags
+    }
+
+    private func storageRefs(
+        sql: String,
+        bind: (SQLiteStatement) throws -> Void
+    ) throws -> [String] {
+        let statement = try connection.prepare(sql)
+        try bind(statement)
+
+        var refs: [String] = []
+        while try statement.step() {
+            guard let ref = statement.columnText(at: 0) else {
+                throw CacheError.internalInconsistency("SQLite metadata row contains NULL storage_ref text.")
+            }
+            refs.append(ref)
+        }
+        return refs
     }
 
     private func scalarInt64(sql: String, bind: (SQLiteStatement) throws -> Void) throws -> Int64 {

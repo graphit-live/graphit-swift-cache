@@ -148,6 +148,8 @@ public struct CacheBucket: Sendable {
 
     /// Performs explicit maintenance for this bucket.
     ///
+    /// Bucket cleanup is scoped to this bucket and does not remove store-level temporary files.
+    ///
     /// - Returns: A cleanup result describing removed entries and skipped leases.
     /// - Throws: A `CacheError` if cleanup fails.
     public func cleanup() async throws -> CacheCleanupResult {

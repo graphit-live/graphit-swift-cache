@@ -115,5 +115,7 @@ Default `options` parameters use empty options. `dataInfo` and `fileInfo` do not
 - all file APIs on memory-only buckets throw `unsupportedFileStorage`.
 - exact-key removal and same-key replacement throw if the existing file is leased.
 - broad removal/cleanup skip leased files and report.
+- missing leased file payloads return absent for new reads/leases, but metadata repair is deferred until release.
+- `CacheBucket.cleanup()` is bucket-scoped and does not remove store-level temp files; `CacheStore.cleanup()` handles store-level temp orphans.
 - no public `contains` APIs in v1.
 - no typed value get/set APIs in v1.

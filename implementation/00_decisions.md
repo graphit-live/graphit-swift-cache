@@ -154,6 +154,8 @@ No automatic full startup cleanup in v1. `CacheStore.init` validates, creates di
 - Reads lazily repair the specific expired/missing entry they touch.
 - Writes enforce capacity for the affected bucket.
 - Apps call `cleanup()` explicitly for expired entries, temp/final orphans, metadata rows with missing files, and capacity enforcement.
+- `CacheStore.cleanup()` may remove store-level temp orphans; `CacheBucket.cleanup()` is bucket-scoped and does not remove store-level temp files.
+- Missing payload metadata is repaired when unleased; if the missing payload is a leased file, repair is deferred and skipped/counts until release.
 - `bucket(_:)` returns configured active buckets only.
 - `usage()` reports configured buckets only.
 - `removeAll(in:)` may remove any valid bucket ID under the store root, including buckets no longer configured by the current app version.
@@ -218,6 +220,7 @@ Use explicit synchronous release plus synchronous `deinit` safety net. No `Task`
 - `CachedFileLease.release()` is synchronous and idempotent.
 - Internal lease token decrements a `Synchronization.Mutex`-protected lease table synchronously.
 - Bulk removal/cleanup skip leased files and report `skippedLeasedEntries`.
+- Missing-file repair also respects leases: new reads/leases return `nil`, but metadata is retained until the lease is released.
 - Direct exact-key removal and same-key replacement of a leased file throw.
 - Playback examples must retain the lease for the whole playback lifetime.
 

@@ -32,7 +32,9 @@ If implementation shifts from this task/spec, stop and align before continuing.
 - Add memory/resource tests where feasible:
   - lease deinit releases;
   - temp files cleaned after failed/cancelled write;
-  - stale versioned payload files cleaned as orphans after replacement.
+  - bucket cleanup does not remove store-level temp orphans;
+  - stale versioned payload files cleaned as orphans after replacement;
+  - missing leased payload repair is deferred until release.
 - Audit public API for accidental deferred types or fields.
 - Audit SQLite schema for speculative indexes.
 - Run debug and release builds if practical.

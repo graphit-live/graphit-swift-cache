@@ -529,6 +529,8 @@ public struct CacheBucket: Sendable {
 
 `dataInfo` and `fileInfo` do not update `lastAccessedAt` or sliding expiration. Payload reads (`data`, `leaseFile`) do update access metadata.
 
+`CacheBucket.cleanup()` is bucket-scoped. Store-level temporary file cleanup is performed by `CacheStore.cleanup()`.
+
 One key maps to one entry:
 
 - `setData` may replace an existing data or file entry;
@@ -742,7 +744,7 @@ No `Task.detached`. No `await` occurs inside SQLite transactions. The final same
 
 V1 exposes cached file URLs only through `leaseFile(_:)`. The returned lease must be retained for as long as the caller uses the file URL.
 
-`leaseFile(_:)` returns a retained lease that blocks eviction, removal, and same-key replacement while active. Direct `remove(_:)` or `setData`/`setFile` for a leased file key throws `fileIsLeased`. Bulk removal/cleanup skip leased files and report `skippedLeasedEntries`.
+`leaseFile(_:)` returns a retained lease that blocks eviction, removal, and same-key replacement while active. Direct `remove(_:)` or `setData`/`setFile` for a leased file key throws `fileIsLeased`. Bulk removal/cleanup skip leased files and report `skippedLeasedEntries`. If corruption or external deletion makes a leased payload file missing, new reads/leases return `nil`, but metadata repair is deferred until the lease is released.
 
 ### 6.6 Info APIs
 
@@ -782,6 +784,10 @@ If capacity cannot be satisfied, the write throws and the new entry must not rem
 - remove temp or orphan files;
 - remove metadata rows whose payload files are missing;
 - enforce bucket capacity.
+
+`CacheStore.cleanup()` may remove store-level temp orphans. `CacheBucket.cleanup()` is bucket-scoped and does not remove store-level temp files.
+
+Metadata rows with missing payload files are removed when unleased. If the missing payload is a leased file, cleanup skips and counts it; repair can occur after release.
 
 No full cleanup runs automatically at startup.
 

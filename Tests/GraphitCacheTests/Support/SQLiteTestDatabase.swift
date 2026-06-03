@@ -6,7 +6,7 @@ final class SQLiteTestDatabase {
 
     init(url: URL) throws {
         var opened: OpaquePointer?
-        let status = sqlite3_open_v2(url.path, &opened, SQLITE_OPEN_READONLY, nil)
+        let status = sqlite3_open_v2(url.path, &opened, SQLITE_OPEN_READWRITE, nil)
         guard status == SQLITE_OK, let opened else {
             if let opened {
                 sqlite3_close(opened)
@@ -57,6 +57,19 @@ final class SQLiteTestDatabase {
         return String(cString: UnsafeRawPointer(text).assumingMemoryBound(to: CChar.self))
     }
 
+    func updateStorageRef(_ storageRef: String, bucket: String, key: String) throws {
+        let statement = try prepare("UPDATE entries SET storage_ref = ? WHERE bucket = ? AND key = ?;")
+        defer { sqlite3_finalize(statement) }
+        try bind(storageRef, to: statement, at: 1)
+        try bind(bucket, to: statement, at: 2)
+        try bind(key, to: statement, at: 3)
+
+        let status = sqlite3_step(statement)
+        guard status == SQLITE_DONE else {
+            throw TestDatabaseError.stepFailed(status)
+        }
+    }
+
     private func prepare(_ sql: String) throws -> OpaquePointer {
         var statement: OpaquePointer?
         let status = sqlite3_prepare_v2(database, sql, -1, &statement, nil)
@@ -80,6 +93,7 @@ enum TestDatabaseError: Error {
     case openFailed(Int32)
     case prepareFailed(Int32)
     case bindFailed(Int32)
+    case stepFailed(Int32)
     case queryReturnedNoRows
 }
 

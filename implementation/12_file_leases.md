@@ -40,6 +40,7 @@ Why lock table, not actor: `deinit` cannot `await`; no unstructured task allowed
 - acquire after file existence/metadata validation, before returning URL.
 - removal and same-key replacement check lease table immediately before deleting or replacing a file.
 - if cleanup selects victim then lease appears before delete: recheck and skip.
+- if a leased payload file is externally deleted or missing, new reads/leases return nil but metadata repair is deferred until release.
 - release does not auto-delete pending removals in v1; next cleanup/removal can delete.
 
 ## Usage examples
@@ -94,4 +95,5 @@ Do not release immediately after calling a player method that returns before pla
 - deinit releases without async work.
 - direct exact-key removal and same-key replacement while leased throw.
 - bulk cleanup reports skipped leased.
+- missing-file repair is deferred while leased and succeeds after release.
 - after release, cleanup/removal succeeds.

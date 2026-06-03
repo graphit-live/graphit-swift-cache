@@ -17,7 +17,7 @@ If implementation shifts from this task/spec, stop and align before continuing.
 
 - Store/bucket `cleanup()` complete behavior.
 - Expired entry cleanup for memory and disk.
-- Disk orphan temp removal.
+- Store-level disk orphan temp removal from `CacheStore.cleanup()`; `CacheBucket.cleanup()` does not remove store-level temp files.
 - Disk orphan final file removal, including stale versioned replacement payloads.
 - Metadata-with-missing-file repair.
 - Read-time missing-file repair.
@@ -28,7 +28,8 @@ If implementation shifts from this task/spec, stop and align before continuing.
 ## Required behavior
 
 - No automatic full startup cleanup.
-- Missing payload file makes read return nil and removes metadata.
+- Missing payload file makes read return nil and removes metadata when unleased.
+- Missing leased file payloads return nil for new reads/leases, skip/count during cleanup, and repair after release.
 - File without metadata is removed by manual cleanup.
 - `bucket(_:)` still throws for unconfigured active buckets.
 - `usage()` reports configured active buckets only.

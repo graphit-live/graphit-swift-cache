@@ -28,7 +28,7 @@ No public `GraphitCacheTesting` product in v1.
 3. Memory policies: fixed/sliding/never expiration, LRU, oldest-inserted-first, max item/count/total limits, simplified usage.
 4. Disk-backed data: persistence across store recreation, versioned storage refs, two-phase temp write, replacement resets metadata, capacity failures leave no entry.
 5. Files and leases: import copy semantics, source remains, leased managed URL, data/file same-key replacement, leased replacement/removal failure, bulk skip.
-6. Cleanup/recovery: expired cleanup, orphan temp/final files, metadata missing file, old/unconfigured bucket `removeAll(in:)`.
+6. Cleanup/recovery: expired cleanup, store-level temp orphans, bucket-scoped final orphans, metadata missing file, missing leased payload repair after release, old/unconfigured bucket `removeAll(in:)`.
 7. Usage: total/per-bucket size/count, memory/disk split only.
 8. Concurrency/cancellation: concurrent sets/gets, same-key replacement, cleanup while leasing/reading, cancellation before commit.
 9. Resource lifecycle: resources release when no store/bucket handles remain; no public close API; disk tests use isolated roots because v1 supports one active `CacheStore` with disk-backed buckets per root.

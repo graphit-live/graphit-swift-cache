@@ -34,12 +34,14 @@ If implementation shifts from this task/spec, stop and align before continuing.
 - LRU vs oldest-inserted-first eviction.
 - usage reports are intentionally simple.
 - cleanup is explicit manual maintenance; no automatic full startup cleanup.
+- `CacheStore.cleanup()` handles store-level temp orphans; `CacheBucket.cleanup()` is bucket-scoped.
 - `removeAll(in:)` can remove old/unconfigured buckets for migrations.
 - when disk-backed buckets are present, initialization performs bounded synchronous local filesystem/SQLite setup.
 - one active `CacheStore` with disk-backed buckets per root; v1 does not coordinate multiple active stores sharing a root.
 - disk-backed Data writes and file imports use internal off-actor I/O helpers.
 - cached file URLs are lease-only and cache-managed.
 - file leases must be retained for playback/long reads.
+- missing leased file payload repair is deferred until release.
 - no public close lifecycle API.
 - keys/tags should not contain sensitive data if app logs them.
 - no public instrumentation/events in v1.

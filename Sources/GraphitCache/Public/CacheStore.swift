@@ -56,6 +56,8 @@ public final class CacheStore: Sendable {
 
     /// Performs explicit cache maintenance.
     ///
+    /// Store cleanup may remove store-level temporary files and disk orphans.
+    ///
     /// - Returns: A cleanup result describing removed entries and skipped leases.
     /// - Throws: A `CacheError` if cleanup fails.
     public func cleanup() async throws -> CacheCleanupResult {
@@ -72,8 +74,7 @@ public final class CacheStore: Sendable {
 
     /// Removes all entries in a bucket under the store root.
     ///
-    /// This operation can target old or unconfigured bucket IDs once disk-backed cleanup is
-    /// implemented.
+    /// This operation can target valid old or unconfigured bucket IDs under the store root.
     ///
     /// - Parameter bucket: The bucket identifier to remove.
     /// - Returns: A removal result describing removed entries and skipped leases.

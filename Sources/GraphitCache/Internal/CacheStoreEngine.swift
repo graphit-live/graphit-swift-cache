@@ -7,6 +7,7 @@ actor CacheStoreEngine {
     private let metadataIndex: SQLiteMetadataIndex?
     private let leaseTable = LeaseTable()
     private var memory = MemoryCacheEngine()
+    private var activeTemporaryFiles: Set<URL> = []
 
     init(configuration: CacheStoreConfiguration) throws {
         self.configuration = configuration
@@ -71,47 +72,107 @@ actor CacheStoreEngine {
 
     func cleanup() throws -> CacheCleanupResult {
         let now = configuration.clock.now()
-        let expired = memory.removeExpired(now: now)
-        var evictedEntries = 0
-        var evictedBytes: Int64 = 0
+        var result = CacheCleanupResult.empty
+
+        let memoryExpired = memory.removeExpired(now: now)
+        result = combined(result, cleanupResult(expired: memoryExpired))
 
         for bucket in configuration.buckets where bucket.policy.storage == .memoryOnly {
             let eviction = memory.enforceCapacity(in: bucket.id, policy: bucket.policy)
-            evictedEntries += eviction.removedEntries
-            evictedBytes += eviction.removedBytes.bytes
+            result = combined(result, cleanupResult(evicted: eviction))
         }
 
-        return CacheCleanupResult(
-            removedExpiredEntries: expired.removedEntries,
-            removedExpiredBytes: expired.removedBytes,
-            evictedEntries: evictedEntries,
-            evictedBytes: ByteCount.bytes(evictedBytes)
-        )
+        if let metadataIndex, let diskFileStore {
+            let leaseCheck = diskLeaseCheck()
+            var skippedLeasedEntries = Set<DiskLeasedEntryIdentity>()
+
+            let diskExpired = try metadataIndex.removeExpired(at: now, isFileLeased: leaseCheck)
+            try diskFileStore.removeStorageRefs(diskExpired.storageRefs)
+            result = combined(result, cleanupResult(expired: diskExpired.removal))
+            skippedLeasedEntries.formUnion(diskExpired.skippedLeasedEntries)
+
+            let missingPayloadRepair = try metadataIndex.removeEntriesWithMissingPayloads(
+                storageRefExists: { storageRef in diskFileStore.storageRefExists(storageRef) },
+                isFileLeased: leaseCheck
+            )
+            skippedLeasedEntries.formUnion(missingPayloadRepair.skippedLeasedEntries)
+
+            let removedTempOrphans = try diskFileStore.removeTemporaryOrphans(excluding: activeTemporaryFiles)
+            result = combined(result, cleanupResult(orphanedFiles: removedTempOrphans))
+
+            let knownRefs = try metadataIndex.storageRefs()
+            let removedFinalOrphans = try diskFileStore.removeFinalOrphans(knownStorageRefs: knownRefs)
+            result = combined(result, cleanupResult(orphanedFiles: removedFinalOrphans))
+
+            for bucket in configuration.buckets where bucket.policy.storage == .diskBacked {
+                let eviction = try metadataIndex.enforceCapacity(
+                    in: bucket.id,
+                    policy: bucket.policy,
+                    isFileLeased: leaseCheck
+                )
+                try diskFileStore.removeStorageRefs(eviction.storageRefs)
+                result = combined(result, cleanupResult(evicted: eviction.removal))
+                skippedLeasedEntries.formUnion(eviction.skippedLeasedEntries)
+            }
+
+            result = combined(result, cleanupResult(skippedLeasedEntries: skippedLeasedEntries.count))
+        }
+
+        return result
     }
 
     func cleanup(bucket: CacheBucketID) throws -> CacheCleanupResult {
-        guard let policy = bucketPolicies[bucket], policy.storage == .memoryOnly else {
+        guard let policy = bucketPolicies[bucket] else {
             return .empty
         }
 
         let now = configuration.clock.now()
-        let expired = memory.removeExpired(in: bucket, now: now)
-        let eviction = memory.enforceCapacity(in: bucket, policy: policy)
+        switch policy.storage {
+        case .memoryOnly:
+            let expired = memory.removeExpired(in: bucket, now: now)
+            let eviction = memory.enforceCapacity(in: bucket, policy: policy)
+            return combined(cleanupResult(expired: expired), cleanupResult(evicted: eviction))
+        case .diskBacked:
+            let metadataIndex = try diskIndex()
+            let diskFileStore = try diskStore()
+            let leaseCheck = diskLeaseCheck()
+            var result = CacheCleanupResult.empty
+            var skippedLeasedEntries = Set<DiskLeasedEntryIdentity>()
 
-        return CacheCleanupResult(
-            removedExpiredEntries: expired.removedEntries,
-            removedExpiredBytes: expired.removedBytes,
-            evictedEntries: eviction.removedEntries,
-            evictedBytes: eviction.removedBytes
-        )
+            let expired = try metadataIndex.removeExpired(in: bucket, at: now, isFileLeased: leaseCheck)
+            try diskFileStore.removeStorageRefs(expired.storageRefs)
+            result = combined(result, cleanupResult(expired: expired.removal))
+            skippedLeasedEntries.formUnion(expired.skippedLeasedEntries)
+
+            let missingPayloadRepair = try metadataIndex.removeEntriesWithMissingPayloads(
+                in: bucket,
+                storageRefExists: { storageRef in diskFileStore.storageRefExists(storageRef) },
+                isFileLeased: leaseCheck
+            )
+            skippedLeasedEntries.formUnion(missingPayloadRepair.skippedLeasedEntries)
+
+            let knownRefs = try metadataIndex.storageRefs(in: bucket)
+            let removedFinalOrphans = try diskFileStore.removeFinalOrphans(
+                knownStorageRefs: knownRefs,
+                in: bucket
+            )
+            result = combined(result, cleanupResult(orphanedFiles: removedFinalOrphans))
+
+            let eviction = try metadataIndex.enforceCapacity(in: bucket, policy: policy, isFileLeased: leaseCheck)
+            try diskFileStore.removeStorageRefs(eviction.storageRefs)
+            result = combined(result, cleanupResult(evicted: eviction.removal))
+            skippedLeasedEntries.formUnion(eviction.skippedLeasedEntries)
+
+            return combined(result, cleanupResult(skippedLeasedEntries: skippedLeasedEntries.count))
+        }
     }
 
     func removeAll() throws -> CacheRemovalResult {
         var result = memory.removeAll()
         if let metadataIndex, let diskFileStore {
             let diskRemoval = try metadataIndex.removeAll(isFileLeased: diskLeaseCheck())
-            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
-            result = combined(result, diskRemoval.0)
+            try diskFileStore.removeStorageRefs(diskRemoval.storageRefs)
+            result = combined(result, diskRemoval.removal)
         }
         return result
     }
@@ -123,8 +184,8 @@ actor CacheStoreEngine {
         }
         if let metadataIndex, let diskFileStore {
             let diskRemoval = try metadataIndex.removeAll(in: bucket, isFileLeased: diskLeaseCheck())
-            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
-            result = combined(result, diskRemoval.0)
+            try diskFileStore.removeStorageRefs(diskRemoval.storageRefs)
+            result = combined(result, diskRemoval.removal)
         }
         return result
     }
@@ -133,8 +194,8 @@ actor CacheStoreEngine {
         var result = memory.removeAll(tagged: tag)
         if let metadataIndex, let diskFileStore {
             let diskRemoval = try metadataIndex.removeAll(tagged: tag, isFileLeased: diskLeaseCheck())
-            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
-            result = combined(result, diskRemoval.0)
+            try diskFileStore.removeStorageRefs(diskRemoval.storageRefs)
+            result = combined(result, diskRemoval.removal)
         }
         return result
     }
@@ -143,8 +204,8 @@ actor CacheStoreEngine {
         var result = memory.removeAll(insertedBefore: date)
         if let metadataIndex, let diskFileStore {
             let diskRemoval = try metadataIndex.removeAll(insertedBefore: date, isFileLeased: diskLeaseCheck())
-            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
-            result = combined(result, diskRemoval.0)
+            try diskFileStore.removeStorageRefs(diskRemoval.storageRefs)
+            result = combined(result, diskRemoval.removal)
         }
         return result
     }
@@ -156,8 +217,8 @@ actor CacheStoreEngine {
         }
         if let metadataIndex, let diskFileStore {
             let diskRemoval = try metadataIndex.removeAll(in: bucket, tagged: tag, isFileLeased: diskLeaseCheck())
-            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
-            result = combined(result, diskRemoval.0)
+            try diskFileStore.removeStorageRefs(diskRemoval.storageRefs)
+            result = combined(result, diskRemoval.removal)
         }
         return result
     }
@@ -169,8 +230,8 @@ actor CacheStoreEngine {
         }
         if let metadataIndex, let diskFileStore {
             let diskRemoval = try metadataIndex.removeAll(in: bucket, insertedBefore: date, isFileLeased: diskLeaseCheck())
-            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
-            result = combined(result, diskRemoval.0)
+            try diskFileStore.removeStorageRefs(diskRemoval.storageRefs)
+            result = combined(result, diskRemoval.removal)
         }
         return result
     }
@@ -257,8 +318,8 @@ actor CacheStoreEngine {
                 isFileLeased: diskLeaseCheck()
             )
             let diskFileStore = try diskStore()
-            diskFileStore.removeStorageRefsBestEffort(diskRemoval.1)
-            return diskRemoval.0
+            try diskFileStore.removeStorageRefs(diskRemoval.storageRefs)
+            return diskRemoval.removal
         }
     }
 
@@ -276,6 +337,8 @@ actor CacheStoreEngine {
         let diskFileStore = try diskStore()
         let metadataIndex = try diskIndex()
         let plan = diskFileStore.planDataWrite(bucket: bucket, key: key)
+        activeTemporaryFiles.insert(plan.temporaryURL)
+        defer { activeTemporaryFiles.remove(plan.temporaryURL) }
 
         try Task.checkCancellation()
         do {
@@ -327,6 +390,8 @@ actor CacheStoreEngine {
 
         let fileExtension = try resolvedFileExtension(sourceURL: sourceURL, options: options)
         let plan = diskFileStore.planFileWrite(bucket: bucket, key: key, fileExtension: fileExtension)
+        activeTemporaryFiles.insert(plan.temporaryURL)
+        defer { activeTemporaryFiles.remove(plan.temporaryURL) }
 
         try Task.checkCancellation()
         do {
@@ -372,7 +437,12 @@ actor CacheStoreEngine {
 
         let now = configuration.clock.now()
         if record.info().isExpired(at: now) {
-            try removeDiskRecord(bucket: bucket, key: key)
+            try removeDiskRecordIfCurrent(record)
+            return nil
+        }
+
+        guard try diskStore().storageRefExists(record.storageRef) else {
+            try removeDiskRecordIfCurrent(record)
             return nil
         }
 
@@ -386,9 +456,12 @@ actor CacheStoreEngine {
 
         let now = configuration.clock.now()
         if record.info().isExpired(at: now) {
-            if !isFileLeased(bucket: bucket, key: key) {
-                try removeDiskRecord(bucket: bucket, key: key)
-            }
+            try removeDiskRecordIfCurrent(record)
+            return nil
+        }
+
+        guard try diskStore().storageRefExists(record.storageRef) else {
+            try removeDiskRecordIfCurrent(record)
             return nil
         }
 
@@ -402,20 +475,16 @@ actor CacheStoreEngine {
 
         let now = configuration.clock.now()
         if record.info().isExpired(at: now) {
-            if !isFileLeased(bucket: bucket, key: key) {
-                try removeDiskRecord(bucket: bucket, key: key)
-            }
+            try removeDiskRecordIfCurrent(record)
             return nil
         }
 
         let diskFileStore = try diskStore()
-        let fileURL = diskFileStore.url(forStorageRef: record.storageRef)
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            if !isFileLeased(bucket: bucket, key: key) {
-                try removeDiskRecord(bucket: bucket, key: key)
-            }
+        guard diskFileStore.storageRefExists(record.storageRef) else {
+            try removeDiskRecordIfCurrent(record)
             return nil
         }
+        let fileURL = try diskFileStore.url(forStorageRef: record.storageRef)
 
         let accessedAtUS = CacheDateEncoding.microsecondsSinceEpoch(now)
         let updatedExpiresAtUS: Int64?
@@ -451,11 +520,26 @@ actor CacheStoreEngine {
         }
 
         if initialRecord.info().isExpired(at: configuration.clock.now()) {
-            try removeDiskRecord(bucket: bucket, key: key)
+            try removeDiskRecordIfCurrent(initialRecord)
             return nil
         }
 
-        let data = try await diskStore().readData(storageRef: initialRecord.storageRef)
+        let diskFileStore = try diskStore()
+        guard diskFileStore.storageRefExists(initialRecord.storageRef) else {
+            try removeDiskRecordIfCurrent(initialRecord)
+            return nil
+        }
+
+        let data: Data
+        do {
+            data = try await diskFileStore.readData(storageRef: initialRecord.storageRef)
+        } catch {
+            if !diskFileStore.storageRefExists(initialRecord.storageRef) {
+                try removeDiskRecordIfCurrent(initialRecord)
+                return nil
+            }
+            throw error
+        }
         try Task.checkCancellation()
 
         guard let currentRecord = try diskIndex().fetchEntry(bucket: bucket, key: key),
@@ -467,7 +551,11 @@ actor CacheStoreEngine {
 
         let accessedAt = configuration.clock.now()
         if currentRecord.info().isExpired(at: accessedAt) {
-            try removeDiskRecord(bucket: bucket, key: key)
+            try removeDiskRecordIfCurrent(currentRecord)
+            return nil
+        }
+        guard diskFileStore.storageRefExists(currentRecord.storageRef) else {
+            try removeDiskRecordIfCurrent(currentRecord)
             return nil
         }
 
@@ -495,10 +583,15 @@ actor CacheStoreEngine {
         )
     }
 
-    private func removeDiskRecord(bucket: CacheBucketID, key: CacheKey) throws {
-        let removal = try diskIndex().removeEntry(bucket: bucket, key: key)
+    private func removeDiskRecordIfCurrent(_ record: DiskEntryRecord) throws {
+        let removal = try diskIndex().removeEntry(
+            bucket: record.bucket,
+            key: record.key,
+            matchingStorageRef: record.storageRef,
+            isFileLeased: diskLeaseCheck()
+        )
         let diskFileStore = try diskStore()
-        diskFileStore.removeStorageRefsBestEffort(removal.1)
+        diskFileStore.removeStorageRefsBestEffort(removal.storageRefs)
     }
 
     private func diskExpiration(
@@ -582,6 +675,43 @@ actor CacheStoreEngine {
             throw CacheError.internalInconsistency("SQLite metadata index is unavailable.")
         }
         return metadataIndex
+    }
+
+    private func cleanupResult(expired removal: CacheRemovalResult) -> CacheCleanupResult {
+        CacheCleanupResult(
+            removedExpiredEntries: removal.removedEntries,
+            removedExpiredBytes: removal.removedBytes
+        )
+    }
+
+    private func cleanupResult(evicted removal: CacheRemovalResult) -> CacheCleanupResult {
+        CacheCleanupResult(
+            evictedEntries: removal.removedEntries,
+            evictedBytes: removal.removedBytes
+        )
+    }
+
+    private func cleanupResult(orphanedFiles removal: OrphanFileRemovalResult) -> CacheCleanupResult {
+        CacheCleanupResult(
+            removedOrphanedFiles: removal.removedFiles,
+            removedOrphanedBytes: removal.removedBytes
+        )
+    }
+
+    private func cleanupResult(skippedLeasedEntries: Int) -> CacheCleanupResult {
+        CacheCleanupResult(skippedLeasedEntries: skippedLeasedEntries)
+    }
+
+    private func combined(_ lhs: CacheCleanupResult, _ rhs: CacheCleanupResult) -> CacheCleanupResult {
+        CacheCleanupResult(
+            removedExpiredEntries: lhs.removedExpiredEntries + rhs.removedExpiredEntries,
+            removedExpiredBytes: ByteCount.bytes(lhs.removedExpiredBytes.bytes + rhs.removedExpiredBytes.bytes),
+            removedOrphanedFiles: lhs.removedOrphanedFiles + rhs.removedOrphanedFiles,
+            removedOrphanedBytes: ByteCount.bytes(lhs.removedOrphanedBytes.bytes + rhs.removedOrphanedBytes.bytes),
+            evictedEntries: lhs.evictedEntries + rhs.evictedEntries,
+            evictedBytes: ByteCount.bytes(lhs.evictedBytes.bytes + rhs.evictedBytes.bytes),
+            skippedLeasedEntries: lhs.skippedLeasedEntries + rhs.skippedLeasedEntries
+        )
     }
 
     private func combined(_ lhs: CacheRemovalResult, _ rhs: CacheRemovalResult) -> CacheRemovalResult {
